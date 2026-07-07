@@ -35,7 +35,7 @@ import jwt, { JwtPayload, Secret } from "jsonwebtoken";
 import mongoose, { ProjectionType, Types } from "mongoose";
 import { StringValue } from "ms";
 
-const default_referral_code = "UB46AD4532D";
+const default_referral_code = "UD71DFE67A0";
 
 /* ── 🔐 Register user ───────────────────────────────── */
 export const registerUser: typeHandler = catchAsync(async (req, res, next) => {
