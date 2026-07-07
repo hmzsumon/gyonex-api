@@ -1,49 +1,268 @@
-import { NextFunction, Request, Response } from "express";
 import mongoose from "mongoose";
 
-import { AppError } from "../middlewares/error.middleware";
-import { getFileUrl } from "../middlewares/upload.middleware";
-import { AdminLog, Notification, Transaction } from "../models/index";
-import { Loan } from "../models/Loan.model";
-import { User } from "../models/User.model.new";
-import { Wallet } from "../models/Wallet.model";
+import { AdminNotification } from "@/models/AdminNotification.model";
+import { AdminLog } from "@/models/index";
+import { Loan } from "@/models/Loan.model";
+import { Notification } from "@/models/Notification.model";
+import { User } from "@/models/user.model";
+import UserWallet from "@/models/UserWallet.model";
+
+import { typeHandler } from "@/types/express";
+import { ApiError } from "@/utils/ApiError";
+import { catchAsync } from "@/utils/catchAsync";
+import TransactionManager from "@/utils/TransactionManager";
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Global socket type
+   deposit.controller এর মত global.io safe ভাবে use করা হবে।
+───────────────────────────────────────────────────────────────────────── */
+declare global {
+  // eslint-disable-next-line no-var
+  var io:
+    | {
+        to: (room: string) => {
+          emit: (event: string, data: any) => void;
+        };
+        emit: (event: string, data: any) => void;
+      }
+    | undefined;
+}
 
 /* ─────────────────────────────────────────────────────────────────────────
    Auth helper
-   Project-এর main auth middleware isAuthenticatedUser req.user set করে।
-   তাই loan controller-এ req.authUser নয়, req.user থেকে userId নেওয়া হবে।
+   Project auth middleware req.user set করে।
 ───────────────────────────────────────────────────────────────────────── */
-function getAuthUserId(req: Request): mongoose.Types.ObjectId | string {
-  const userId = req.user?._id;
+function getAuthUserId(req: any): mongoose.Types.ObjectId | string {
+  const userId = req.user?._id || req.authUser?.userId;
 
   if (!userId) {
-    throw new AppError("User not authenticated", 401);
+    throw new ApiError(401, "User not authenticated");
   }
 
   return userId as mongoose.Types.ObjectId | string;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
+   ObjectId helper
+   Mongoose document _id অনেক সময় TypeScript unknown ধরে।
+───────────────────────────────────────────────────────────────────────── */
+function asObjectId(id: unknown): mongoose.Types.ObjectId {
+  return id as mongoose.Types.ObjectId;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Money helper
+───────────────────────────────────────────────────────────────────────── */
+function toMoney(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Socket room helper
+   আপনার socket/index.ts এ user room হচ্ছে u:${userId}
+   deposit.controller এ String(userId) room use করা আছে।
+   তাই দুই room-এই emit করা হবে।
+───────────────────────────────────────────────────────────────────────── */
+function getUserSocketRooms(
+  userId: mongoose.Types.ObjectId | string,
+): string[] {
+  const uid = String(userId);
+  return [uid, `u:${uid}`];
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   User socket emit helper
+   User notification realtime পাঠাবে।
+───────────────────────────────────────────────────────────────────────── */
+async function emitUserLoanNotification({
+  userId,
+  notification,
+  message,
+  event = "loan-update",
+  extra = {},
+}: {
+  userId: mongoose.Types.ObjectId | string;
+  notification: any;
+  message: string;
+  event?: string;
+  extra?: Record<string, unknown>;
+}) {
+  if (!global?.io?.to) return;
+
+  const unreadCount = await Notification.countDocuments({
+    user_id: userId,
+    is_read: false,
+  });
+
+  for (const room of getUserSocketRooms(userId)) {
+    global.io.to(room).emit("notifications:new", notification);
+
+    global.io.to(room).emit("notifications:count", {
+      count: unreadCount,
+    });
+
+    global.io.to(room).emit("user-notification", {
+      success: true,
+      message,
+      notification,
+      ...extra,
+    });
+
+    global.io.to(room).emit(event, {
+      success: true,
+      message,
+      notification,
+      ...extra,
+    });
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Admin socket emit helper
+   deposit.controller এর মত admin notification broadcast করা হবে।
+───────────────────────────────────────────────────────────────────────── */
+async function emitAdminLoanNotification({
+  notification,
+  message,
+  event = "loan-admin-update",
+  extra = {},
+}: {
+  notification: any;
+  message: string;
+  event?: string;
+  extra?: Record<string, unknown>;
+}) {
+  if (!global?.io?.emit) return;
+
+  const unreadCount = await AdminNotification.countDocuments({
+    is_read: false,
+  });
+
+  global.io.emit("admin-notification", {
+    success: true,
+    message,
+    notification,
+    ...extra,
+  });
+
+  global.io.emit("admin-notifications:count", {
+    count: unreadCount,
+  });
+
+  global.io.emit(event, {
+    success: true,
+    message,
+    notification,
+    ...extra,
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Create user notification + socket emit
+   Notification model এ user_id required, তাই userId নয় user_id use করা হয়েছে।
+───────────────────────────────────────────────────────────────────────── */
+async function createLoanUserNotification({
+  userId,
+  role,
+  title,
+  message,
+  category = "other",
+  url = "/loans",
+  event,
+  extra,
+}: {
+  userId: mongoose.Types.ObjectId | string;
+  role?: string;
+  title: string;
+  message: string;
+  category?:
+    | "deposit"
+    | "withdraw"
+    | "transfer"
+    | "admin"
+    | "other"
+    | "profit"
+    | "lottery"
+    | "announcement"
+    | "payment"
+    | "bonus"
+    | "package"
+    | "kyc"
+    | "spin_prize"
+    | "refund"
+    | "vip_tier";
+  url?: string;
+  event?: string;
+  extra?: Record<string, unknown>;
+}) {
+  const notification = await Notification.create({
+    user_id: userId,
+    role,
+    title,
+    category,
+    message,
+    url,
+  });
+
+  await emitUserLoanNotification({
+    userId,
+    notification,
+    message: title,
+    event,
+    extra,
+  });
+
+  return notification;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Create admin notification + socket emit
+   AdminNotification model এ user_id নেই, তাই schema অনুযায়ী create করা হয়েছে।
+───────────────────────────────────────────────────────────────────────── */
+async function createLoanAdminNotification({
+  title,
+  message,
+  category = "admin",
+  url = "/loans",
+  event,
+  extra,
+}: {
+  title: string;
+  message: string;
+  category?: string;
+  url?: string;
+  event?: string;
+  extra?: Record<string, unknown>;
+}) {
+  const notification = await AdminNotification.create({
+    title,
+    category,
+    message,
+    url,
+  });
+
+  await emitAdminLoanNotification({
+    notification,
+    message: title,
+    event,
+    extra,
+  });
+
+  return notification;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
    USER: Loan packages
    GET /loans/packages
 ───────────────────────────────────────────────────────────────────────── */
-export const getLoanPackages = (_req: Request, res: Response) => {
+export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
   res.json({
     success: true,
     data: {
       eligibility: {
-        tier1: {
-          minBalance: 2001,
-          maxBalance: 5000,
-          supportPct: 50,
-          note: "Balance $2,001–$5,000: 50% loan support",
-        },
-        tier2: {
-          minBalance: 5001,
-          maxBalance: null,
-          supportPct: 100,
-          note: "Balance $5,001+: 100% loan support",
-        },
+        kycRequired: true,
+        note: "KYC verification is required before applying for a loan.",
       },
       types: {
         trading: {
@@ -51,7 +270,7 @@ export const getLoanPackages = (_req: Request, res: Response) => {
           rate: 0.06,
           defaultDays: 50,
           maxDays: 50,
-          minAmount: 100,
+          minAmount: 50,
           icon: "📈",
           desc: "Automated trading capital",
         },
@@ -102,565 +321,738 @@ export const getLoanPackages = (_req: Request, res: Response) => {
         },
       },
       requirements: [
-        "Valid NID card photo",
-        "Clear selfie",
-        "Minimum balance threshold",
         "KYC approved",
+        "Loan amount",
+        "Repayment period",
+        "Admin review required",
       ],
     },
   });
-};
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    USER: My loans
    GET /loans/my
 ───────────────────────────────────────────────────────────────────────── */
-export const getMyLoans = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const userId = getAuthUserId(req);
-    const {
-      status,
-      page = "1",
-      limit = "10",
-    } = req.query as Record<string, string>;
+export const getMyLoans: typeHandler = catchAsync(async (req, res) => {
+  const userId = getAuthUserId(req);
 
-    const filter: Record<string, unknown> = { userId };
-    if (status) filter.status = status;
+  const {
+    status,
+    page = "1",
+    limit = "10",
+  } = req.query as Record<string, string>;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+  const filter: Record<string, unknown> = { userId };
+  if (status) filter.status = status;
 
-    const [loans, total] = await Promise.all([
-      Loan.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit)),
-      Loan.countDocuments(filter),
-    ]);
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.max(1, parseInt(limit, 10) || 10);
+  const skip = (pageNum - 1) * limitNum;
 
-    const all = await Loan.find({ userId });
+  const [loans, total] = await Promise.all([
+    Loan.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limitNum),
+    Loan.countDocuments(filter),
+  ]);
 
-    const totalBorrowed = all
-      .filter((l) => l.status !== "rejected")
-      .reduce((s, l) => s + l.requestedAmount, 0);
-    const totalRepaid = all.reduce((s, l) => s + l.totalPaid, 0);
-    const activeLoans = all.filter((l) => l.status === "active").length;
-    const pendingLoans = all.filter((l) => l.status === "pending").length;
+  const all = await Loan.find({ userId });
 
-    res.json({
-      success: true,
-      data: {
-        loans,
-        total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        summary: { totalBorrowed, totalRepaid, activeLoans, pendingLoans },
+  const totalBorrowed = all
+    .filter((l) => l.status !== "rejected")
+    .reduce((s, l) => s + toMoney(l.approvedAmount || l.requestedAmount), 0);
+
+  const totalRepaid = all.reduce((s, l) => s + toMoney(l.totalPaid), 0);
+  const activeLoans = all.filter((l) => l.status === "active").length;
+  const pendingLoans = all.filter((l) => l.status === "pending").length;
+
+  res.json({
+    success: true,
+    data: {
+      loans,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      summary: {
+        totalBorrowed,
+        totalRepaid,
+        activeLoans,
+        pendingLoans,
       },
-    });
-  } catch (e) {
-    next(e);
-  }
-};
+    },
+  });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    USER: Loan countdown
    GET /loans/my/countdown
 ───────────────────────────────────────────────────────────────────────── */
-export const getMyLoanCountdown = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const userId = getAuthUserId(req);
-    const activeLoans = await Loan.find({ userId, status: "active" });
+export const getMyLoanCountdown: typeHandler = catchAsync(async (req, res) => {
+  const userId = getAuthUserId(req);
+  const activeLoans = await Loan.find({ userId, status: "active" });
 
-    const data = activeLoans.map((loan) => {
-      const now = Date.now();
-      const due = loan.dueDate ? new Date(loan.dueDate).getTime() : 0;
-      const msLeft = Math.max(0, due - now);
-      const daysLeft = Math.floor(msLeft / 86400000);
-      const hoursLeft = Math.floor((msLeft % 86400000) / 3600000);
-      const minsLeft = Math.floor((msLeft % 3600000) / 60000);
-      const secsLeft = Math.floor((msLeft % 60000) / 1000);
-      const totalDays = loan.repaymentPeriodDays;
-      const elapsed = totalDays - daysLeft;
-      const progress = Math.min(100, (elapsed / totalDays) * 100);
-      const repayPct = loan.totalRepayable
-        ? (loan.totalPaid / loan.totalRepayable) * 100
-        : 0;
-      const isOverdue = due > 0 && due < now;
+  const data = activeLoans.map((loan) => {
+    const now = Date.now();
+    const due = loan.dueDate ? new Date(loan.dueDate).getTime() : 0;
+    const msLeft = Math.max(0, due - now);
 
-      return {
-        loanId: loan._id,
-        loanType: loan.loanType,
-        status: loan.status,
-        requestedAmount: loan.requestedAmount,
-        approvedAmount: loan.approvedAmount,
-        totalRepayable: loan.totalRepayable,
-        totalPaid: loan.totalPaid,
-        remainingAmount: Math.max(
-          0,
-          (loan.totalRepayable || 0) - loan.totalPaid,
-        ),
-        disbursedAt: loan.disbursedAt,
-        dueDate: loan.dueDate,
-        repaymentPeriodDays: loan.repaymentPeriodDays,
-        daysLeft,
-        hoursLeft,
-        minsLeft,
-        secsLeft,
-        timeLeft: `${daysLeft}d ${hoursLeft}h ${minsLeft}m`,
-        totalDays,
-        elapsedDays: elapsed,
-        timeProgress: progress,
-        repayProgress: repayPct,
-        isOverdue,
-        urgency: isOverdue
-          ? "overdue"
-          : daysLeft <= 3
-            ? "critical"
-            : daysLeft <= 7
-              ? "warning"
-              : "normal",
-      };
-    });
+    const daysLeft = Math.floor(msLeft / 86400000);
+    const hoursLeft = Math.floor((msLeft % 86400000) / 3600000);
+    const minsLeft = Math.floor((msLeft % 3600000) / 60000);
+    const secsLeft = Math.floor((msLeft % 60000) / 1000);
 
-    res.json({ success: true, data });
-  } catch (e) {
-    next(e);
-  }
-};
+    const totalDays = loan.repaymentPeriodDays || 1;
+    const elapsed = Math.max(0, totalDays - daysLeft);
+    const timeProgress = Math.min(100, (elapsed / totalDays) * 100);
+
+    const repayProgress = loan.totalRepayable
+      ? (loan.totalPaid / loan.totalRepayable) * 100
+      : 0;
+
+    const isOverdue = due > 0 && due < now;
+
+    return {
+      loanId: loan._id,
+      loanType: loan.loanType,
+      status: loan.status,
+      requestedAmount: loan.requestedAmount,
+      approvedAmount: loan.approvedAmount,
+      totalRepayable: loan.totalRepayable,
+      totalPaid: loan.totalPaid,
+      remainingAmount: Math.max(
+        0,
+        toMoney(loan.totalRepayable) - toMoney(loan.totalPaid),
+      ),
+      disbursedAt: loan.disbursedAt,
+      dueDate: loan.dueDate,
+      repaymentPeriodDays: loan.repaymentPeriodDays,
+      daysLeft,
+      hoursLeft,
+      minsLeft,
+      secsLeft,
+      timeLeft: `${daysLeft}d ${hoursLeft}h ${minsLeft}m`,
+      totalDays,
+      elapsedDays: elapsed,
+      timeProgress,
+      repayProgress,
+      isOverdue,
+      urgency: isOverdue
+        ? "overdue"
+        : daysLeft <= 3
+          ? "critical"
+          : daysLeft <= 7
+            ? "warning"
+            : "normal",
+    };
+  });
+
+  res.json({ success: true, data });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    USER: Apply for loan
    POST /loans/apply
 ───────────────────────────────────────────────────────────────────────── */
-export const applyForLoan = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const userId = getAuthUserId(req);
-    const files = req.files as unknown as {
-      [fieldname: string]: Express.Multer.File[];
-    };
+export const applyForLoan: typeHandler = catchAsync(async (req, res) => {
+  const userId = getAuthUserId(req);
+  const { loanType, requestedAmount, repaymentPeriodDays } = req.body;
 
-    const {
-      loanType,
-      requestedAmount,
-      purpose,
-      repaymentPeriodDays,
-      applicantName,
-      applicantEmail,
-      nidNumber,
-    } = req.body;
+  const user = await User.findById(userId);
+  if (!user) throw new ApiError(404, "User not found");
 
-    /* ── Duplicate active/pending loan block ── */
-    const existingLoan = await Loan.findOne({
-      userId,
-      status: { $in: ["pending", "active"] },
-    });
+  const userObjectId = asObjectId(user._id);
 
-    if (existingLoan) {
-      return next(
-        new AppError(
-          "You already have a pending or active loan. Please repay it first.",
-          400,
-        ),
-      );
-    }
+  /* ────────── KYC required ────────── */
+  const isKycVerified =
+    Boolean((user as any).kyc_verified) ||
+    (user as any).kycStatus === "verified" ||
+    Boolean((user as any).isKycVerified);
 
-    /* ── Balance eligibility check ── */
-    const usdtWallet = await Wallet.findOne({ userId, asset: "USDT" });
-    const usdtBalance = usdtWallet?.balance || 0;
-
-    if (usdtBalance < 2001) {
-      return next(
-        new AppError(
-          `Minimum USDT balance of $2,001 required. Your balance: $${usdtBalance.toFixed(2)}`,
-          400,
-        ),
-      );
-    }
-
-    const maxLoan = usdtBalance >= 5001 ? usdtBalance : usdtBalance * 0.5;
-
-    if (parseFloat(requestedAmount) > maxLoan) {
-      return next(
-        new AppError(
-          `Max loan is $${maxLoan.toFixed(2)} (${usdtBalance >= 5001 ? "100%" : "50%"} of your $${usdtBalance.toFixed(2)} balance)`,
-          400,
-        ),
-      );
-    }
-
-    const nidPhotoUrl = files.nidPhoto?.[0]
-      ? getFileUrl("loans", files.nidPhoto[0].filename)
-      : undefined;
-    const selfieUrl = files.selfie?.[0]
-      ? getFileUrl("loans", files.selfie[0].filename)
-      : undefined;
-
-    const interestRate = 0.06;
-    const days = parseInt(repaymentPeriodDays);
-    const totalInterest =
-      parseFloat(requestedAmount) * interestRate * (days / 30);
-    const totalRepayable = parseFloat(requestedAmount) + totalInterest;
-
-    const loan = await Loan.create({
-      userId,
-      loanType,
-      requestedAmount: parseFloat(requestedAmount),
-      purpose,
-      repaymentPeriodDays: days,
-      interestRate,
-      totalRepayable,
-      monthlyInstallment: totalRepayable / (days / 30),
-      applicantName,
-      applicantEmail,
-      nidNumber,
-      nidPhotoUrl,
-      selfieUrl,
-      status: "pending",
-    });
-
-    await Notification.create({
-      userId,
-      title: "📋 Loan Application Received",
-      message: `Your ${loanType} loan application of $${requestedAmount} has been submitted. We'll review within 24 hours.`,
-      type: "info",
-      link: "/loans",
-    });
-
-    const admins = await User.find({
-      role: { $in: ["admin", "super_admin", "finance_admin"] },
-    }).select("_id");
-
-    await Notification.insertMany(
-      admins.map((a) => ({
-        userId: a._id,
-        title: `💰 New Loan Application — $${requestedAmount}`,
-        message: `${applicantName} applied for a ${loanType} loan. Review required.`,
-        type: "info",
-        link: "/admin/loans",
-      })),
+  if (!isKycVerified) {
+    throw new ApiError(
+      403,
+      "Please verify your KYC before applying for a loan.",
     );
-
-    await AdminLog.create({
-      adminId: userId,
-      action: "loan_application",
-      target: loan._id,
-      targetModel: "Loan",
-      details: { amount: requestedAmount, type: loanType },
-    });
-
-    res.status(201).json({
-      success: true,
-      message:
-        "Loan application submitted successfully! Review takes up to 24 hours.",
-      data: loan,
-    });
-  } catch (e) {
-    next(e);
   }
-};
+
+  /* ────────── Duplicate pending/active loan block ────────── */
+  const existingLoan = await Loan.findOne({
+    userId: userObjectId,
+    status: { $in: ["pending", "active"] },
+  });
+
+  if (existingLoan) {
+    throw new ApiError(
+      400,
+      "You already have a pending or active loan. Please repay it first.",
+    );
+  }
+
+  /* ────────── Basic validation ────────── */
+  const amount = Number(requestedAmount);
+  const days = Number(repaymentPeriodDays);
+
+  if (!loanType) {
+    throw new ApiError(400, "Loan type is required");
+  }
+
+  if (!Number.isFinite(amount) || amount < 50) {
+    throw new ApiError(400, "Minimum loan amount is $50");
+  }
+
+  if (!Number.isFinite(days) || days < 7) {
+    throw new ApiError(400, "Repayment period must be at least 7 days");
+  }
+
+  const interestRate = 0.06;
+  const totalInterest = amount * interestRate * (days / 30);
+  const totalRepayable = amount + totalInterest;
+
+  const loan = await Loan.create({
+    userId: userObjectId,
+    loanType,
+    requestedAmount: amount,
+    purpose: "KYC verified loan application",
+    repaymentPeriodDays: days,
+    interestRate,
+    totalRepayable,
+    monthlyInstallment: totalRepayable / (days / 30),
+    applicantName: user.name || "KYC Verified User",
+    applicantEmail: user.email || "",
+    nidNumber: "KYC_VERIFIED",
+    status: "pending",
+  });
+
+  /* ────────── User notification + socket ────────── */
+  await createLoanUserNotification({
+    userId: userObjectId,
+    role: user.role,
+    title: "Loan Application Received",
+    message: `Your ${loanType} loan application of $${amount} has been submitted and is under review.`,
+    category: "other",
+    url: "/loans",
+    event: "loan-update",
+    extra: {
+      loanId: loan._id,
+      status: "pending",
+      amount,
+    },
+  });
+
+  /* ────────── Admin notification + socket ────────── */
+  await createLoanAdminNotification({
+    title: "New Loan Application",
+    message: `${user.name || user.email} applied for a ${loanType} loan of $${amount}. Review required.`,
+    category: "admin",
+    url: "/loans",
+    event: "loan-admin-update",
+    extra: {
+      loanId: loan._id,
+      status: "pending",
+      amount,
+      userId: userObjectId,
+    },
+  });
+
+  await AdminLog.create({
+    adminId: userObjectId,
+    action: "loan_application",
+    targetId: asObjectId(loan._id),
+    targetType: "Loan",
+    details: {
+      amount,
+      type: loanType,
+      userId: userObjectId,
+    },
+  });
+
+  res.status(201).json({
+    success: true,
+    message: "Loan application submitted successfully. Status: Under Review.",
+    data: loan,
+  });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    USER: Repay loan
    POST /loans/:loanId/repay
 ───────────────────────────────────────────────────────────────────────── */
-export const repayLoan = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const userId = getAuthUserId(req);
-    const loan = await Loan.findOne({
-      _id: req.params.loanId,
-      userId,
-      status: "active",
-    });
+export const repayLoan: typeHandler = catchAsync(async (req, res) => {
+  const userId = getAuthUserId(req);
 
-    if (!loan) return next(new AppError("Active loan not found", 404));
+  const loan = await Loan.findOne({
+    _id: req.params.loanId,
+    userId,
+    status: "active",
+  });
 
-    const payAmount = parseFloat(req.body.amount);
-    const remaining = (loan.totalRepayable || 0) - loan.totalPaid;
+  if (!loan) throw new ApiError(404, "Active loan not found");
 
-    if (payAmount > remaining) {
-      return next(
-        new AppError(`Maximum repayment is $${remaining.toFixed(2)}`, 400),
-      );
-    }
+  const payAmount = Number(req.body.amount);
+  const remaining = Math.max(
+    0,
+    toMoney(loan.totalRepayable) - toMoney(loan.totalPaid),
+  );
 
-    const wallet = await Wallet.findOne({ userId, asset: "USDT" });
-
-    if (!wallet || wallet.availableBalance < payAmount) {
-      return next(new AppError("Insufficient USDT balance", 400));
-    }
-
-    await wallet.debit(payAmount);
-
-    const tx = await Transaction.create({
-      userId,
-      walletId: wallet._id,
-      type: "loan_repayment",
-      asset: "USDT",
-      amount: -payAmount,
-      fee: 0,
-      netAmount: -payAmount,
-      status: "completed",
-      completedAt: new Date(),
-      metadata: { loanId: loan._id },
-    });
-
-    loan.totalPaid += payAmount;
-    loan.repaymentHistory.push({
-      amount: payAmount,
-      paidAt: new Date(),
-      transactionId: tx._id as mongoose.Types.ObjectId,
-    });
-
-    if (loan.totalPaid >= (loan.totalRepayable || 0)) {
-      loan.status = "completed";
-
-      await Notification.create({
-        userId,
-        title: "🎉 Loan Fully Repaid!",
-        message: `Congratulations! Your ${loan.loanType} loan has been fully repaid.`,
-        type: "success",
-        link: "/loans",
-      });
-    }
-
-    await loan.save();
-
-    res.json({
-      success: true,
-      message: `$${payAmount} repayment successful`,
-      data: loan,
-    });
-  } catch (e) {
-    next(e);
+  if (!Number.isFinite(payAmount) || payAmount <= 0) {
+    throw new ApiError(400, "Please enter a valid repayment amount");
   }
-};
+
+  if (payAmount > remaining) {
+    throw new ApiError(400, `Maximum repayment is $${remaining.toFixed(2)}`);
+  }
+
+  const user = await User.findById(userId);
+  if (!user) throw new ApiError(404, "User not found");
+
+  const userObjectId = asObjectId(user._id);
+
+  if (toMoney(user.m_balance) < payAmount) {
+    throw new ApiError(400, "Insufficient main balance");
+  }
+
+  /* ────────── Repayment from main balance ────────── */
+  user.last_m_balance = toMoney(user.m_balance);
+  user.m_balance = Math.max(0, toMoney(user.m_balance) - payAmount);
+  await user.save();
+
+  await UserWallet.findOneAndUpdate(
+    { userId: userObjectId },
+    {
+      $setOnInsert: {
+        userId: userObjectId,
+        customerId: user.customerId || String(userObjectId),
+      },
+      $inc: {
+        totalLoanPay: payAmount,
+        remainingLoanAmount: -payAmount,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  await UserWallet.findOneAndUpdate(
+    { userId: userObjectId, remainingLoanAmount: { $lt: 0 } },
+    { $set: { remainingLoanAmount: 0 } },
+  );
+
+  loan.totalPaid = toMoney(loan.totalPaid) + payAmount;
+
+  const txManager = new TransactionManager();
+  const tx = await txManager.createTransaction({
+    userId: userObjectId,
+    customerId: user.customerId,
+    amount: payAmount,
+    transactionType: "cashOut",
+    purpose: "Transfer",
+    description: `Loan repayment for ${loan.loanType} loan`,
+  });
+
+  loan.repaymentHistory.push({
+    amount: payAmount,
+    paidAt: new Date(),
+    transactionId: asObjectId(tx._id),
+    note: "Loan repayment from main balance",
+  });
+
+  const isCompleted = loan.totalPaid >= toMoney(loan.totalRepayable);
+
+  if (isCompleted) {
+    loan.status = "completed";
+
+    await UserWallet.findOneAndUpdate(
+      { userId: userObjectId },
+      { $set: { remainingLoanAmount: 0 } },
+    );
+  }
+
+  await loan.save();
+
+  /* ────────── User notification + socket ────────── */
+  await createLoanUserNotification({
+    userId: userObjectId,
+    role: user.role,
+    title: isCompleted ? "Loan Fully Repaid" : "Loan Repayment Successful",
+    message: isCompleted
+      ? `Congratulations! Your ${loan.loanType} loan has been fully repaid.`
+      : `Your repayment of $${payAmount} for ${loan.loanType} loan was successful.`,
+    category: "other",
+    url: "/loans",
+    event: "loan-update",
+    extra: {
+      loanId: loan._id,
+      status: loan.status,
+      amount: payAmount,
+      remainingAmount: Math.max(
+        0,
+        toMoney(loan.totalRepayable) - toMoney(loan.totalPaid),
+      ),
+    },
+  });
+
+  /* ────────── Admin notification + socket ────────── */
+  await createLoanAdminNotification({
+    title: isCompleted ? "Loan Fully Repaid" : "Loan Repayment Received",
+    message: isCompleted
+      ? `${user.name || user.email} fully repaid the ${loan.loanType} loan.`
+      : `${user.name || user.email} repaid $${payAmount} for ${loan.loanType} loan.`,
+    category: "admin",
+    url: "/loans",
+    event: "loan-admin-update",
+    extra: {
+      loanId: loan._id,
+      status: loan.status,
+      amount: payAmount,
+      userId: userObjectId,
+    },
+  });
+
+  res.json({
+    success: true,
+    message: `$${payAmount} repayment successful`,
+    data: loan,
+  });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    ADMIN: All loans
    GET /loans/admin/all
 ───────────────────────────────────────────────────────────────────────── */
-export const getAllLoansForAdmin = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const {
-      status,
-      page = "1",
-      limit = "20",
-    } = req.query as Record<string, string>;
+export const getAllLoansForAdmin: typeHandler = catchAsync(async (req, res) => {
+  const {
+    status,
+    page = "1",
+    limit = "20",
+  } = req.query as Record<string, string>;
 
-    const filter: Record<string, unknown> = {};
-    if (status) filter.status = status;
+  const filter: Record<string, unknown> = {};
+  if (status) filter.status = status;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+  const skip = (pageNum - 1) * limitNum;
 
-    const [loans, total] = await Promise.all([
-      Loan.find(filter)
-        .populate("userId", "fullName email phone kycStatus")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit)),
-      Loan.countDocuments(filter),
-    ]);
+  const [loans, total] = await Promise.all([
+    Loan.find(filter)
+      .populate(
+        "userId",
+        "name fullName email phone kyc_verified kycStatus customerId role",
+      )
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum),
+    Loan.countDocuments(filter),
+  ]);
 
-    const [pending, active, totalCount, pendingLoans] = await Promise.all([
+  const [pending, active, completed, rejected, totalCount, pendingLoans] =
+    await Promise.all([
       Loan.countDocuments({ status: "pending" }),
       Loan.countDocuments({ status: "active" }),
+      Loan.countDocuments({ status: "completed" }),
+      Loan.countDocuments({ status: "rejected" }),
       Loan.countDocuments(),
       Loan.find({ status: "pending" }),
     ]);
 
-    const stats = {
-      pending,
-      active,
-      total: totalCount,
-      totalAmountPending: pendingLoans.reduce(
-        (s, l) => s + l.requestedAmount,
-        0,
-      ),
-    };
+  const stats = {
+    pending,
+    active,
+    completed,
+    rejected,
+    total: totalCount,
+    totalAmountPending: pendingLoans.reduce(
+      (s, l) => s + toMoney(l.requestedAmount),
+      0,
+    ),
+  };
 
-    res.json({
-      success: true,
-      data: { loans, total, page: parseInt(page), stats },
-    });
-  } catch (e) {
-    next(e);
-  }
-};
+  res.json({
+    success: true,
+    data: {
+      loans,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      stats,
+    },
+  });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    ADMIN: Approve loan
    PATCH /loans/admin/:loanId/approve
 ───────────────────────────────────────────────────────────────────────── */
-export const approveLoan = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const adminId = getAuthUserId(req);
-    const loan = await Loan.findOne({
-      _id: req.params.loanId,
-      status: "pending",
-    });
+export const approveLoan: typeHandler = catchAsync(async (req, res) => {
+  const adminId = getAuthUserId(req);
 
-    if (!loan) return next(new AppError("Pending loan not found", 404));
+  const loan = await Loan.findOne({
+    _id: req.params.loanId,
+    status: "pending",
+  });
 
-    const approvedAmount = req.body.approvedAmount
-      ? parseFloat(req.body.approvedAmount)
-      : loan.requestedAmount;
+  if (!loan) throw new ApiError(404, "Pending loan not found");
 
-    const rate = 0.06;
-    const totalRepayable =
-      approvedAmount * (1 + rate * (loan.repaymentPeriodDays / 30));
+  const approvedAmount = req.body.approvedAmount
+    ? Number(req.body.approvedAmount)
+    : toMoney(loan.requestedAmount);
 
-    let wallet = await Wallet.findOne({ userId: loan.userId, asset: "MAIN" });
-    if (!wallet)
-      wallet = await Wallet.findOne({ userId: loan.userId, asset: "USDT" });
-    if (!wallet) return next(new AppError("User wallet not found", 404));
+  if (!Number.isFinite(approvedAmount) || approvedAmount <= 0) {
+    throw new ApiError(400, "Please enter a valid approved amount");
+  }
 
-    await wallet.credit(approvedAmount);
+  const rate = 0.06;
+  const totalRepayable =
+    approvedAmount * (1 + rate * (loan.repaymentPeriodDays / 30));
 
-    await Transaction.create({
-      userId: loan.userId,
-      walletId: wallet._id,
-      type: "loan_disbursement",
-      asset: wallet.asset,
-      amount: approvedAmount,
-      fee: 0,
-      netAmount: approvedAmount,
-      status: "completed",
-      completedAt: new Date(),
-      metadata: { loanId: loan._id },
-    });
+  const user = await User.findById(loan.userId);
+  if (!user) throw new ApiError(404, "User not found");
 
-    await Loan.findByIdAndUpdate(loan._id, {
+  const userObjectId = asObjectId(user._id);
+  const adminObjectId = asObjectId(adminId);
+
+  /* ────────── Credit loan to user main balance ────────── */
+  const previousBalance = toMoney(user.m_balance);
+  user.last_m_balance = previousBalance;
+  user.m_balance = previousBalance + approvedAmount;
+  await user.save();
+
+  /* ────────── Wallet loan summary update ────────── */
+  const userWallet = await UserWallet.findOneAndUpdate(
+    { userId: userObjectId },
+    {
+      $setOnInsert: {
+        userId: userObjectId,
+        customerId: user.customerId || String(userObjectId),
+      },
+      $inc: {
+        totalLoanAmount: approvedAmount,
+        remainingLoanAmount: approvedAmount,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  /* ────────── Transaction log ────────── */
+  const txManager = new TransactionManager();
+  await txManager.createTransaction({
+    userId: userObjectId,
+    customerId: user.customerId,
+    amount: approvedAmount,
+    transactionType: "cashIn",
+    purpose: "Admin Deposit",
+    description: `Loan approved and disbursed for ${loan.loanType}`,
+  });
+
+  const updatedLoan = await Loan.findByIdAndUpdate(
+    loan._id,
+    {
       status: "active",
       approvedAmount,
       disbursedAmount: approvedAmount,
       totalRepayable,
       monthlyInstallment: totalRepayable / (loan.repaymentPeriodDays / 30),
-      approvedBy: adminId,
+      approvedBy: adminObjectId,
       approvedAt: new Date(),
       disbursedAt: new Date(),
       dueDate: new Date(Date.now() + loan.repaymentPeriodDays * 86400000),
-      walletId: wallet._id,
-      adminNote: req.body.adminNote,
-    });
+      adminNote: req.body.adminNote || "",
+      walletId: userWallet?._id,
+    },
+    { new: true },
+  );
 
-    await Notification.create({
-      userId: loan.userId,
-      title: "✅ Loan Approved & Disbursed!",
-      message: `Your ${loan.loanType} loan of $${approvedAmount} has been approved and credited to your wallet.`,
-      type: "success",
-      link: "/loans",
-    });
+  /* ────────── User notification + socket ────────── */
+  await createLoanUserNotification({
+    userId: userObjectId,
+    role: user.role,
+    title: "Loan Approved & Disbursed",
+    message: `Your ${loan.loanType} loan of $${approvedAmount} has been approved and credited to your main balance.`,
+    category: "other",
+    url: "/loans",
+    event: "loan-update",
+    extra: {
+      loanId: loan._id,
+      status: "active",
+      amount: approvedAmount,
+      totalRepayable,
+      m_balance: user.m_balance,
+    },
+  });
 
-    await AdminLog.create({
-      adminId,
-      action: "loan_approved",
-      target: loan._id,
-      targetModel: "Loan",
-      details: { approvedAmount, adminNote: req.body.adminNote },
-    });
+  /* ────────── Admin notification + socket ────────── */
+  await createLoanAdminNotification({
+    title: "Loan Approved",
+    message: `${user.name || user.email} loan approved and $${approvedAmount} disbursed.`,
+    category: "admin",
+    url: "/loans",
+    event: "loan-admin-update",
+    extra: {
+      loanId: loan._id,
+      status: "active",
+      amount: approvedAmount,
+      userId: userObjectId,
+    },
+  });
 
-    res.json({
-      success: true,
-      message: `Loan approved and $${approvedAmount} disbursed`,
-      data: { approvedAmount },
-    });
-  } catch (e) {
-    next(e);
-  }
-};
+  await AdminLog.create({
+    adminId: adminObjectId,
+    action: "loan_approved",
+    targetId: asObjectId(loan._id),
+    targetType: "Loan",
+    details: {
+      approvedAmount,
+      adminNote: req.body.adminNote || "",
+      userId: userObjectId,
+    },
+  });
+
+  res.json({
+    success: true,
+    message: `Loan approved and $${approvedAmount} added to user main balance`,
+    data: updatedLoan,
+  });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    ADMIN: Reject loan
    PATCH /loans/admin/:loanId/reject
 ───────────────────────────────────────────────────────────────────────── */
-export const rejectLoan = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const loan = await Loan.findOneAndUpdate(
-      { _id: req.params.loanId, status: "pending" },
-      {
+export const rejectLoan: typeHandler = catchAsync(async (req, res) => {
+  const adminId = getAuthUserId(req);
+
+  const loan = await Loan.findOneAndUpdate(
+    { _id: req.params.loanId, status: "pending" },
+    {
+      status: "rejected",
+      adminNote: req.body.reason || "",
+      rejectedAt: new Date(),
+    },
+    { new: true },
+  );
+
+  if (!loan) throw new ApiError(404, "Pending loan not found");
+
+  const user = await User.findById(loan.userId).select(
+    "_id name email role customerId",
+  );
+
+  if (user) {
+    const userObjectId = asObjectId(user._id);
+
+    /* ────────── User notification + socket ────────── */
+    await createLoanUserNotification({
+      userId: userObjectId,
+      role: user.role,
+      title: "Loan Application Rejected",
+      message: `Your ${loan.loanType} loan application was rejected. Reason: ${
+        req.body.reason || "Not specified"
+      }`,
+      category: "other",
+      url: "/loans",
+      event: "loan-update",
+      extra: {
+        loanId: loan._id,
         status: "rejected",
-        adminNote: req.body.reason,
-        rejectedAt: new Date(),
+        reason: req.body.reason || "",
       },
-      { new: true },
-    );
-
-    if (!loan) return next(new AppError("Pending loan not found", 404));
-
-    await Notification.create({
-      userId: loan.userId,
-      title: "❌ Loan Application Rejected",
-      message: `Your ${loan.loanType} loan application was rejected. Reason: ${req.body.reason}`,
-      type: "error",
-      link: "/loans",
     });
 
-    res.json({ success: true, message: "Loan rejected", data: loan });
-  } catch (e) {
-    next(e);
+    /* ────────── Admin notification + socket ────────── */
+    await createLoanAdminNotification({
+      title: "Loan Rejected",
+      message: `${user.name || user.email} loan request was rejected.`,
+      category: "admin",
+      url: "/loans",
+      event: "loan-admin-update",
+      extra: {
+        loanId: loan._id,
+        status: "rejected",
+        userId: userObjectId,
+      },
+    });
   }
-};
+
+  await AdminLog.create({
+    adminId: asObjectId(adminId),
+    action: "loan_rejected",
+    targetId: asObjectId(loan._id),
+    targetType: "Loan",
+    details: {
+      reason: req.body.reason || "",
+      userId: loan.userId,
+    },
+  });
+
+  res.json({
+    success: true,
+    message: "Loan rejected successfully",
+    data: loan,
+  });
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
    ADMIN: Run daily defaults
    POST /loans/admin/run-defaults
 ───────────────────────────────────────────────────────────────────────── */
-export const runLoanDefaults = async (
-  _req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  try {
-    const now = new Date();
-    const overdue = await Loan.find({
-      status: "active",
-      dueDate: { $lt: now },
-    });
-    let defaulted = 0;
+export const runLoanDefaults: typeHandler = catchAsync(async (_req, res) => {
+  const now = new Date();
 
-    for (const loan of overdue) {
-      await Loan.findByIdAndUpdate(loan._id, { status: "defaulted" });
+  const overdue = await Loan.find({
+    status: "active",
+    dueDate: { $lt: now },
+  });
 
-      await Notification.create({
-        userId: loan.userId,
-        title: "⚠️ Loan Defaulted",
+  let defaulted = 0;
+
+  for (const loan of overdue) {
+    const updatedLoan = await Loan.findByIdAndUpdate(
+      loan._id,
+      { status: "defaulted" },
+      { new: true },
+    );
+
+    if (!updatedLoan) continue;
+
+    const user = await User.findById(loan.userId).select("_id name email role");
+
+    if (user) {
+      const userObjectId = asObjectId(user._id);
+
+      await createLoanUserNotification({
+        userId: userObjectId,
+        role: user.role,
+        title: "Loan Defaulted",
         message: `Your ${loan.loanType} loan of $${loan.requestedAmount} has been marked as defaulted due to missed repayment deadline.`,
-        type: "error",
-        link: "/loans",
+        category: "other",
+        url: "/loans",
+        event: "loan-update",
+        extra: {
+          loanId: loan._id,
+          status: "defaulted",
+        },
       });
 
-      defaulted++;
+      await createLoanAdminNotification({
+        title: "Loan Defaulted",
+        message: `${user.name || user.email} ${loan.loanType} loan has been marked as defaulted.`,
+        category: "admin",
+        url: "/loans",
+        event: "loan-admin-update",
+        extra: {
+          loanId: loan._id,
+          status: "defaulted",
+          userId: userObjectId,
+        },
+      });
     }
 
-    res.json({ success: true, data: { checked: overdue.length, defaulted } });
-  } catch (e) {
-    next(e);
+    defaulted++;
   }
-};
+
+  res.json({
+    success: true,
+    data: {
+      checked: overdue.length,
+      defaulted,
+    },
+  });
+});

@@ -10,7 +10,6 @@ import {
   runLoanDefaults,
 } from "@/controllers/loan.controller";
 import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
-import { uploadLoan } from "@/middlewares/upload.middleware";
 import { Router } from "express";
 
 const router = Router();
@@ -33,17 +32,9 @@ router.get("/my/countdown", isAuthenticatedUser, getMyLoanCountdown);
 router.get("/my", isAuthenticatedUser, getMyLoans);
 
 /* ────────── apply for loan ──────────
-   এখানে NID photo এবং selfie upload হবে।
+   KYC verified user শুধু amount + period দিয়ে apply করবে।
 ───────────────────────────────────────────────────────────────────────── */
-router.post(
-  "/apply",
-  isAuthenticatedUser,
-  uploadLoan.fields([
-    { name: "nidPhoto", maxCount: 1 },
-    { name: "selfie", maxCount: 1 },
-  ]),
-  applyForLoan,
-);
+router.post("/apply", isAuthenticatedUser, applyForLoan);
 
 /* ────────── repay loan ────────── */
 router.post("/:loanId/repay", isAuthenticatedUser, repayLoan);

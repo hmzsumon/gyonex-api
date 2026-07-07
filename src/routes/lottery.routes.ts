@@ -1,124 +1,105 @@
-import { Router } from "express";
-import { body, query as qv } from "express-validator";
-
+/* ────────── lottery route imports ────────── */
 import {
   buyLotteryTickets,
   createLottery,
   drawLotteryWinner,
   getActiveLottery,
   getAllLotteriesForAdmin,
+  getLotteryEvents,
   getLotteryWinners,
   getMyLotteryTickets,
   getSingleLotteryForAdmin,
   updateLottery,
-} from "../controllers/lottery.controller";
-import { adminOnly, protect } from "../middlewares/auth.middleware";
-import { validate } from "../middlewares/validate.middleware";
-import { LOTTERY_MAX_QTY } from "../models/Lottery.model";
+} from "@/controllers/lottery.controller";
+import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
+import { Router } from "express";
 
+/* ────────── lottery router instance ────────── */
 const router = Router();
 
-/* ─────────────────────────────────────────────────────────────────────────
-   USER ROUTES
-───────────────────────────────────────────────────────────────────────── */
-router.get("/active", protect, getActiveLottery);
+/* ────────── user lottery routes ────────── */
+router.get("/events", isAuthenticatedUser, getLotteryEvents);
+router.get("/active", isAuthenticatedUser, getActiveLottery);
 
+router.post("/events/:id/buy", isAuthenticatedUser, buyLotteryTickets);
+
+/* ────────── old user buy route support ────────── */
+router.post("/:id/buy", isAuthenticatedUser, buyLotteryTickets);
+
+router.get("/my-tickets", isAuthenticatedUser, getMyLotteryTickets);
+router.get("/winners", isAuthenticatedUser, getLotteryWinners);
+
+/* ────────── admin lottery management routes ────────── */
 router.post(
-  "/:id/buy",
-  protect,
-  [
-    body("quantity")
-      .isInt({ min: 1, max: LOTTERY_MAX_QTY })
-      .withMessage(`Quantity must be between 1 and ${LOTTERY_MAX_QTY}`),
-  ],
-  validate,
-  buyLotteryTickets,
+  "/admin/events",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  createLottery,
 );
 
-router.get("/my-tickets", protect, getMyLotteryTickets);
+router.patch(
+  "/admin/events/:id",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  updateLottery,
+);
+
+router.post(
+  "/admin/events/:id/draw",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  drawLotteryWinner,
+);
 
 router.get(
-  "/winners",
-  protect,
-  [
-    qv("page").optional().isInt({ min: 1 }).toInt(),
-    qv("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
-  ],
-  validate,
-  getLotteryWinners,
+  "/admin/events",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  getAllLotteriesForAdmin,
 );
 
-/* ─────────────────────────────────────────────────────────────────────────
-   ADMIN ROUTES
-───────────────────────────────────────────────────────────────────────── */
+router.get(
+  "/admin/events/:id",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  getSingleLotteryForAdmin,
+);
+
+/* ────────── old admin route support ────────── */
 router.post(
   "/admin/create",
-  adminOnly,
-  [
-    body("title").notEmpty().trim(),
-    body("prizeAmount").isFloat({ min: 1 }),
-    body("drawDate")
-      .isISO8601()
-      .custom((val: string) => {
-        const d = new Date(val).getUTCDate();
-        if (d !== 1 && d !== 15) {
-          throw new Error(
-            "Draw date must fall on the 1st or 15th of the month",
-          );
-        }
-        return true;
-      }),
-    body("description").optional().trim(),
-    body("maxTickets").optional().isInt({ min: 1 }),
-  ],
-  validate,
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
   createLottery,
 );
 
 router.patch(
   "/admin/:id",
-  adminOnly,
-  [
-    body("title").optional().notEmpty().trim(),
-    body("prizeAmount").optional().isFloat({ min: 1 }),
-    body("drawDate")
-      .optional()
-      .isISO8601()
-      .custom((val: string) => {
-        const d = new Date(val).getUTCDate();
-        if (d !== 1 && d !== 15) {
-          throw new Error(
-            "Draw date must fall on the 1st or 15th of the month",
-          );
-        }
-        return true;
-      }),
-    body("status").optional().isIn(["upcoming", "open", "cancelled"]),
-    body("description").optional().trim(),
-    body("maxTickets").optional().isInt({ min: 1 }),
-    body("ticketPrice")
-      .not()
-      .exists()
-      .withMessage("Ticket price cannot be changed (fixed at $5)"),
-  ],
-  validate,
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
   updateLottery,
 );
 
-router.post("/admin/:id/draw", adminOnly, drawLotteryWinner);
+router.post(
+  "/admin/:id/draw",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  drawLotteryWinner,
+);
 
 router.get(
   "/admin/all",
-  adminOnly,
-  [
-    qv("page").optional().isInt({ min: 1 }).toInt(),
-    qv("limit").optional().isInt({ min: 1, max: 100 }).toInt(),
-    qv("status").optional().isIn(["upcoming", "open", "drawn", "cancelled"]),
-  ],
-  validate,
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
   getAllLotteriesForAdmin,
 );
 
-router.get("/admin/:id", adminOnly, getSingleLotteryForAdmin);
+router.get(
+  "/admin/:id",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  getSingleLotteryForAdmin,
+);
 
+/* ────────── lottery route export ────────── */
 export default router;

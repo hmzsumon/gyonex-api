@@ -48,7 +48,7 @@ export const newWithdrawRequest: typeHandler = catchAsync(
       0,
       0,
       0,
-      0
+      0,
     );
 
     const endOfDay = new Date(
@@ -58,7 +58,7 @@ export const newWithdrawRequest: typeHandler = catchAsync(
       0,
       0,
       0,
-      0
+      0,
     );
 
     const existingTodayWithdraw = await Withdraw.findOne({
@@ -73,8 +73,8 @@ export const newWithdrawRequest: typeHandler = catchAsync(
       return next(
         new ApiError(
           400,
-          "You have already created a withdraw request today. Please try again tomorrow."
-        )
+          "You have already created a withdraw request today. Please try again tomorrow.",
+        ),
       );
     }
     /* 🔒 Daily limit check end */
@@ -104,14 +104,31 @@ export const newWithdrawRequest: typeHandler = catchAsync(
       return next(new ApiError(404, "User withdraw summary not found"));
     }
 
-    /* ────────── balance checks ────────── */
-    const userBalance = user.m_balance;
-    if (userBalance < 0) {
-      return next(new ApiError(400, "Insufficient balance for withdrawal"));
-    }
+    /* ────────── balance checks ──────────
+       Loan disbursed amount main balance-এ থাকলেও withdraw করা যাবে না।
+       Withdrawable balance = m_balance - remainingLoanAmount.
+    ───────────────────────────────────────────────────────────── */
     const numAmount = Number(amount);
-    if (userBalance < numAmount) {
-      return next(new ApiError(400, "Insufficient balance for withdrawal"));
+    const userBalance = user.m_balance || 0;
+
+    const loanWalletSummary = await UserWallet.findOne({
+      userId: user._id,
+    }).select("remainingLoanAmount");
+
+    const remainingLoanAmount = Math.max(
+      0,
+      loanWalletSummary?.remainingLoanAmount || 0,
+    );
+
+    const withdrawableBalance = Math.max(0, userBalance - remainingLoanAmount);
+
+    if (userBalance < 0 || withdrawableBalance < numAmount) {
+      return next(
+        new ApiError(
+          400,
+          `Insufficient withdrawable balance. Available: ${withdrawableBalance.toFixed(2)}. Loan locked: ${remainingLoanAmount.toFixed(2)}`,
+        ),
+      );
     }
 
     /* ────────── company ────────── */
@@ -196,7 +213,7 @@ export const newWithdrawRequest: typeHandler = catchAsync(
     /* ────────── web push (admins): broadcast new withdraw ────────── */
     try {
       const adminIds = (await User.find({ role: "admin" }, "_id").lean()).map(
-        (a) => String(a._id)
+        (a) => String(a._id),
       );
       if (adminIds.length) {
         await sendPushToAdmins(adminIds, {
@@ -214,7 +231,7 @@ export const newWithdrawRequest: typeHandler = catchAsync(
       success: true,
       message: "Withdraw request created successfully",
     });
-  }
+  },
 );
 
 /* ────────── get my withdraws ────────── */
@@ -254,7 +271,7 @@ export const getAllWithdrawsForAdmin: typeHandler = catchAsync(
       success: true,
       withdraws,
     });
-  }
+  },
 );
 
 //get all pending withdraws for admin
@@ -271,7 +288,7 @@ export const getAllPendingWithdrawsForAdmin: typeHandler = catchAsync(
       success: true,
       withdraws,
     });
-  }
+  },
 );
 
 //get withdraw by id
@@ -293,7 +310,7 @@ export const getWithdrawById: typeHandler = catchAsync(
       success: true,
       withdraw,
     });
-  }
+  },
 );
 
 /* ────────── approve withdraw request ────────── */
@@ -310,7 +327,7 @@ export const approveWithdrawRequest: typeHandler = catchAsync(
     const admin = await User.findById(userId);
     if (!admin || admin.role !== "admin") {
       return next(
-        new ApiError(403, "Only admin can approve withdraw requests")
+        new ApiError(403, "Only admin can approve withdraw requests"),
       );
     }
 
@@ -446,7 +463,7 @@ export const approveWithdrawRequest: typeHandler = catchAsync(
     });
 
     console.log(
-      `Withdraw request approved for user: ${user.name}, Amount: ${withdraw.amount}`
+      `Withdraw request approved for user: ${user.name}, Amount: ${withdraw.amount}`,
     );
 
     res.status(200).json({
@@ -454,7 +471,7 @@ export const approveWithdrawRequest: typeHandler = catchAsync(
       message: "Withdraw request approved successfully",
       withdraw,
     });
-  }
+  },
 );
 
 // reject withdraw request
@@ -543,7 +560,7 @@ export const rejectWithdrawRequest: typeHandler = catchAsync(
     }
 
     console.log(
-      `Withdraw request rejected for user: ${user.name}, Amount: ${withdraw.amount}, Reason: ${reason}`
+      `Withdraw request rejected for user: ${user.name}, Amount: ${withdraw.amount}, Reason: ${reason}`,
     );
 
     res.status(200).json({
@@ -551,5 +568,5 @@ export const rejectWithdrawRequest: typeHandler = catchAsync(
       message: "Withdraw request rejected successfully",
       withdraw,
     });
-  }
+  },
 );

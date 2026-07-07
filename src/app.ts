@@ -13,6 +13,7 @@ import kycRoutes from "@/routes/kyc.routes";
 import notificationRoutes from "@/routes/notification.routes";
 import pushRoutes from "@/routes/push.route";
 import rankRoutes from "@/routes/rank.routes";
+import rankRoutesnew from "@/routes/rank.routes.new";
 import stakingRoutes from "@/routes/staking.routes"; // ✅ NEW
 import userRoutes from "@/routes/user.routes";
 import wheelRoutes from "@/routes/wheel.routes";
@@ -23,16 +24,15 @@ import adminUsersRoutes from "./routes/admin.users.routes";
 import aiAccountRoutes from "./routes/aiAccount.routes";
 import binanceTradeRoutes from "./routes/binanceTrade.routes";
 import cryptoRoutes from "./routes/crypto.routes";
+import depositWalletRoutes from "./routes/deposit-wallet.routes";
 import healthRoutes from "./routes/health.routes";
+import lonanRoutes from "./routes/loan.routes";
+import lotteryRoutes from "./routes/lottery.routes";
 import tradeRoutes from "./routes/trade.routes";
 import tradingPPairRoutes from "./routes/tradingPair.routes";
 import transactionRoutes from "./routes/transactions.routes";
 import transferRoutes from "./routes/transfer.routes";
-import lotteryRoutes from "./routes/lottery.routes";
-import lonanRoutes from "./routes/loan.routes";
-import rankRoutesnew from "@/routes/rank.routes.new";
 import walletRoutes from "./routes/wallet.routes";
-import depositWalletRoutes from "./routes/deposit-wallet.routes";
 // Config
 if (process.env.NODE_ENV !== "production") {
   dotenv.config({ path: "src/config/config.env" });
@@ -61,15 +61,18 @@ app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(fileUpload());
 
+/* ────────── serve uploaded files ────────── */
+app.use("/uploads", express.static("uploads"));
+
 // Routes
 app.use("/api/v1", userRoutes);
 app.use("/api/v1", adminRoutes);
 app.use("/api/v1", adminStakingRoutes); // ✅ NEW
 app.use("/api/v1", stakingRoutes); // ✅ NEW
-app.use(`/api/v1/loans`,           lonanRoutes);
-app.use(`/api/v1/lottery`,         lotteryRoutes);
-app.use(`/api/v1/ranks`,            rankRoutesnew);
-app.use(`/api/v1/wallets`,         walletRoutes);
+app.use(`/api/v1/loans`, lonanRoutes);
+app.use(`/api/v1/lottery`, lotteryRoutes);
+app.use(`/api/v1/ranks`, rankRoutesnew);
+app.use(`/api/v1/wallets`, walletRoutes);
 app.use(`/api/v1/deposit-wallets`, depositWalletRoutes);
 app.use("/api/v1", depositRoutes);
 app.use("/api/v1", rankRoutes);

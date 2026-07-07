@@ -52,6 +52,8 @@ export type TransactionPurpose =
   | "Unsubscribe"
   | "Daily Profit"
   | "Staking Bonus"
+  | "Loan Disbursement"
+  | "Loan Repayment"
   | "Buy Spot Wallet"
   | "Sell Spot Wallet"
   | "Transfer to Spot Wallet"
@@ -150,6 +152,8 @@ const transactionSchema = new Schema<ITransaction>(
         "Unsubscribe",
         "Daily Profit",
         "Staking Bonus",
+        "Loan Disbursement",
+        "Loan Repayment",
         "Buy Spot Wallet",
         "Sell Spot Wallet",
         "Transfer to Spot Wallet",
@@ -180,12 +184,12 @@ const transactionSchema = new Schema<ITransaction>(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 export const Transaction = model<ITransaction>(
   "Transaction",
-  transactionSchema
+  transactionSchema,
 );
 
 export default Transaction;

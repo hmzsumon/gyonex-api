@@ -1,7 +1,9 @@
+/* ────────── lottery server integration ────────── */
 // src/server.ts
 import dotenv from "dotenv";
 import http from "http";
 import app from "./app";
+import { startLotteryAutoDrawCron } from './crons/lotteryAutoDrawCron';
 
 import { connectDB } from "@/config/db";
 import { redis } from "@/lib/redis";
@@ -176,6 +178,8 @@ async function bootstrap() {
     }
 
     // Listen
+    startLotteryAutoDrawCron();
+
     server.listen(PORT, "0.0.0.0", () => {
       const host = process.env.PUBLIC_HOST || "localhost";
       const protocol = process.env.NODE_ENV === "production" ? "https" : "http";

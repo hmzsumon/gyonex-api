@@ -49,6 +49,11 @@ export interface IUserWallet extends Document {
 
   totalAiTradeBalance: number;
   totalLiveTradeBalance: number;
+
+  // Loan
+  totalLoanAmount: number;
+  totalLoanPay: number;
+  remainingLoanAmount: number;
 }
 
 const walletSchema = new Schema<IUserWallet>(
@@ -103,8 +108,13 @@ const walletSchema = new Schema<IUserWallet>(
 
     totalAiTradeBalance: { type: Number, default: 0 },
     totalLiveTradeBalance: { type: Number, default: 0 },
+
+    // Loan summary
+    totalLoanAmount: { type: Number, default: 0 },
+    totalLoanPay: { type: Number, default: 0 },
+    remainingLoanAmount: { type: Number, default: 0 },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 export default mongoose.model<IUserWallet>("UserWallet", walletSchema);

@@ -15,7 +15,8 @@ export type NotificationCategory =
   | "kyc"
   | "spin_prize"
   | "refund"
-  | "vip_tier";
+  | "vip_tier"
+  | "loan";
 
 export interface INotification extends Document {
   user_id: Types.ObjectId;
@@ -59,6 +60,7 @@ const notificationSchema = new Schema<INotification>(
         "spin_prize",
         "vip_tier",
         "refund",
+        "loan",
       ],
     },
     title: {
@@ -86,10 +88,10 @@ const notificationSchema = new Schema<INotification>(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 export const Notification = model<INotification>(
   "Notification",
-  notificationSchema
+  notificationSchema,
 );

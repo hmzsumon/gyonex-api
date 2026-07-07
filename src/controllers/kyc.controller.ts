@@ -215,44 +215,66 @@ export const submitKycDocuments: typeHandler = catchAsync(
 
     const kyc = await getOrCreateKyc(userId);
 
-    if (
-      !kyc.first_name ||
-      !kyc.last_name ||
-      !kyc.date_of_birth ||
-      !kyc.country_of_birth ||
-      !kyc.gender ||
-      !kyc.residential_address
-    ) {
-      return next(new ApiError(400, "Please complete KYC profile first"));
+    /* ── profile fallback ─────────────────────────────────────
+       নতুন mobile KYC flow-তে আলাদা profile submit নেই।
+       তাই user.name থেকে minimum name save করে documents submit allow করা হলো।
+    ─────────────────────────────────────────────────────────── */
+    if (!kyc.first_name || !kyc.last_name) {
+      const nameParts = String(user.name || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      kyc.first_name = kyc.first_name || nameParts[0] || "User";
+      kyc.last_name =
+        kyc.last_name ||
+        (nameParts.length > 1 ? nameParts.slice(1).join(" ") : "Verified");
     }
 
-    /* ── old rejected assets থাকলে clear ───────────────────── */
-    if (kyc.front_image_public_id) {
-      await deleteCloudinaryAsset(kyc.front_image_public_id);
-    }
-    if (kyc.back_image_public_id) {
-      await deleteCloudinaryAsset(kyc.back_image_public_id);
-    }
-    if (kyc.selfie_image_public_id) {
-      await deleteCloudinaryAsset(kyc.selfie_image_public_id);
+    if (!kyc.country_of_birth && user.country) {
+      kyc.country_of_birth = String(user.country).trim();
     }
 
-    const frontUpload = await uploadFileToCloudinary(frontImage, {
-      folder: "upbit/kyc/front",
-      public_id: `kyc-front-${userId}-${Date.now()}`,
-    });
+    /* ── old rejected assets থাকলে clear ─────────────────────
+       Delete fail হলেও submit block করা হবে না।
+    ─────────────────────────────────────────────────────────── */
+    await Promise.allSettled([
+      deleteCloudinaryAsset(kyc.front_image_public_id),
+      deleteCloudinaryAsset(kyc.back_image_public_id),
+      deleteCloudinaryAsset(kyc.selfie_image_public_id),
+    ]);
 
-    const selfieUpload = await uploadFileToCloudinary(selfieImage, {
-      folder: "upbit/kyc/selfie",
-      public_id: `kyc-selfie-${userId}-${Date.now()}`,
-    });
-
+    /* ── upload images ───────────────────────────────────────
+       Cloudinary ENV না থাকলে helper automatic local fallback করবে।
+    ─────────────────────────────────────────────────────────── */
+    let frontUpload: any;
+    let selfieUpload: any;
     let backUpload: any = null;
-    if (backImage) {
-      backUpload = await uploadFileToCloudinary(backImage, {
-        folder: "upbit/kyc/back",
-        public_id: `kyc-back-${userId}-${Date.now()}`,
+
+    try {
+      frontUpload = await uploadFileToCloudinary(frontImage, {
+        folder: "kyc/front",
+        public_id: `kyc-front-${userId}-${Date.now()}`,
       });
+
+      selfieUpload = await uploadFileToCloudinary(selfieImage, {
+        folder: "kyc/selfie",
+        public_id: `kyc-selfie-${userId}-${Date.now()}`,
+      });
+
+      if (backImage) {
+        backUpload = await uploadFileToCloudinary(backImage, {
+          folder: "kyc/back",
+          public_id: `kyc-back-${userId}-${Date.now()}`,
+        });
+      }
+    } catch (error: any) {
+      console.error("[KYC_SUBMIT] Upload failed:", error?.message || error);
+      return next(
+        new ApiError(
+          500,
+          error?.message || "KYC image upload failed. Please try again.",
+        ),
+      );
     }
 
     kyc.document_type = String(docType).trim();
@@ -282,7 +304,17 @@ export const submitKycDocuments: typeHandler = catchAsync(
     user.kyc_step = 2;
     await user.save();
 
-    await notifyAdminsForKycRequest(user, kyc);
+    /* ── admin notification ──────────────────────────────────
+       Notification fail হলেও user submit successful থাকবে।
+    ─────────────────────────────────────────────────────────── */
+    try {
+      await notifyAdminsForKycRequest(user, kyc);
+    } catch (error: any) {
+      console.warn(
+        "[KYC_SUBMIT] Admin notification failed:",
+        error?.message || error,
+      );
+    }
 
     res.status(200).json({
       success: true,
