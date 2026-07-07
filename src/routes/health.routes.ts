@@ -6,13 +6,27 @@ import os from "os";
 const router = express.Router();
 
 const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+
+const isTlsRedis =
+  redisUrl.startsWith("rediss://") || process.env.REDIS_TLS === "true";
+
 const redis = new Redis(redisUrl, {
   lazyConnect: true,
-  maxRetriesPerRequest: 1,
+  enableReadyCheck: false,
+  maxRetriesPerRequest: null,
+  retryStrategy(times) {
+    return Math.min(times * 500, 5000);
+  },
+  tls: isTlsRedis
+    ? {
+        rejectUnauthorized: false,
+      }
+    : undefined,
 });
 
 function getMongoState() {
   const state = mongoose.connection.readyState;
+
   switch (state) {
     case 0:
       return "disconnected";
@@ -27,7 +41,6 @@ function getMongoState() {
   }
 }
 
-// Simple health
 router.get("/health", async (_req, res): Promise<any> => {
   return res.status(200).json({
     success: true,
@@ -40,7 +53,6 @@ router.get("/health", async (_req, res): Promise<any> => {
   });
 });
 
-// Deep health
 router.get("/health/deep", async (_req, res): Promise<any> => {
   let redisStatus = "down";
   let redisError: string | null = null;
@@ -52,9 +64,11 @@ router.get("/health/deep", async (_req, res): Promise<any> => {
   let cronWorker = "unknown";
 
   try {
-    await redis.connect();
+    if (redis.status === "wait" || redis.status === "end") {
+      await redis.connect();
+    }
   } catch {
-    // ignore if already connected
+    // ignore if already connecting/connected
   }
 
   try {
@@ -67,6 +81,7 @@ router.get("/health/deep", async (_req, res): Promise<any> => {
 
   try {
     mongoStatus = getMongoState();
+
     if (mongoStatus !== "connected") {
       mongoError = `MongoDB is ${mongoStatus}`;
     }
@@ -74,13 +89,12 @@ router.get("/health/deep", async (_req, res): Promise<any> => {
     mongoError = error?.message || "MongoDB check failed";
   }
 
-  // Heartbeat check from Redis
   try {
     const realtimeTs = await redis.get("heartbeat:realtime");
     const cronTs = await redis.get("heartbeat:cron");
 
     const now = Date.now();
-    const maxAgeMs = 90 * 1000; // 90 sec
+    const maxAgeMs = 90 * 1000;
 
     if (realtimeTs) {
       realtimeWorker = now - Number(realtimeTs) < maxAgeMs ? "up" : "stale";
