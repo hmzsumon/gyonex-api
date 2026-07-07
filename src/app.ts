@@ -44,8 +44,8 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
-  "https://www.upbittrade.com",
-  "https://upbitadmin.vercel.app",
+  "https://www.gyonex.com",
+  "https://gyonexadmin.vercel.app",
 ];
 
 app.use(
