@@ -3,6 +3,7 @@
 import AgentStatus from "@/models/AgentStatus.model";
 import GenerationRewardConfig from "@/models/GenerationReward.model";
 import Kyc from "@/models/kyc.model";
+import { Notification } from "@/models/Notification.model";
 import SystemStats from "@/models/SystemStats.model";
 import Transaction from "@/models/Transaction.model";
 import { IUser, User } from "@/models/user.model";
@@ -47,6 +48,8 @@ export const registerUser: typeHandler = catchAsync(async (req, res, next) => {
     name,
     phone,
   } = req.body;
+
+  const WELCOME_BONUS = 3;
 
   /* ────────── email to lowercase ────────── */
   const email = String(rawEmail || "")
@@ -116,6 +119,8 @@ export const registerUser: typeHandler = catchAsync(async (req, res, next) => {
     agentName: agent.name,
     parents: [sponsor._id, ...sponsor.parents.slice(0, 4)],
     verify_code,
+    // ✅ Welcome bonus balance
+    m_balance: WELCOME_BONUS,
   });
 
   await Promise.all([
@@ -156,6 +161,52 @@ export const registerUser: typeHandler = catchAsync(async (req, res, next) => {
     agentStatus.totalPlayers += 1;
     agentStatus.toDayPlayers += 1;
     await agentStatus.save();
+  }
+
+  /* ────────── Welcome bonus notification ────────── */
+  const welcomeBonusMessage = `Welcome bonus ${WELCOME_BONUS} USDT has been added to your account.`;
+
+  const welcomeBonusNotification = await Notification.create({
+    user_id: user._id,
+    role: user.role,
+    title: "Welcome Bonus Received",
+    category: "bonus",
+    message: welcomeBonusMessage,
+    url: `/transactions`,
+  });
+
+  /* ────────── Welcome bonus transaction ────────── */
+  const txManager = new TransactionManager();
+
+  await txManager.createTransaction({
+    userId: user._id as string,
+    customerId: user.customerId,
+    transactionType: "cashIn",
+    amount: WELCOME_BONUS,
+    purpose: "Welcome Bonus",
+    description: welcomeBonusMessage,
+  });
+
+  // ✅ Optional realtime notification emit
+  if (global?.io?.to) {
+    const uid = String(user._id);
+
+    global.io.to(uid).emit("notifications:new", welcomeBonusNotification);
+
+    const unreadCount = await Notification.countDocuments({
+      user_id: user._id,
+      is_read: false,
+    });
+
+    global.io.to(uid).emit("notifications:count", {
+      count: unreadCount,
+    });
+
+    global.io.to(uid).emit("user-notification", {
+      success: true,
+      message: welcomeBonusMessage,
+      notification: welcomeBonusNotification,
+    });
   }
 
   const emailContent = emailVerificationTemplate(String(verify_code));

@@ -57,7 +57,8 @@ export type TransactionPurpose =
   | "Buy Spot Wallet"
   | "Sell Spot Wallet"
   | "Transfer to Spot Wallet"
-  | "Transfer to Spot Wallet";
+  | "Transfer to Spot Wallet"
+  | "Welcome Bonus";
 
 export interface ITransaction extends Document {
   userId: Types.ObjectId;
@@ -158,6 +159,7 @@ const transactionSchema = new Schema<ITransaction>(
         "Sell Spot Wallet",
         "Transfer to Spot Wallet",
         "Transfer to Spot Wallet",
+        "Welcome Bonus",
       ],
       required: true,
     },
