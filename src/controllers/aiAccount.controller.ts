@@ -16,7 +16,6 @@ import { getTopOfBook } from "@/services/quote.service";
 import { getContractSpec, isValidLot } from "@/services/specs.service";
 import { typeHandler } from "@/types/express";
 import { ApiError } from "@/utils/ApiError";
-import { applySponsorBonus } from "@/utils/applySponsorBonus";
 import { catchAsync } from "@/utils/catchAsync";
 import { generateAccountNumber } from "@/utils/generateAccountNumber";
 import { round2 } from "@/utils/takeProfit";
@@ -147,14 +146,14 @@ export const createAiAccount: typeHandler = catchAsync(
 
       await updateTeamAiTradeInfo(userId as string, debit);
 
-      if (user.is_new) {
-        await applySponsorBonus({
-          userName: user.name,
-          sponsorId: user.sponsorId as any,
-          amount: debit,
-          plan: selectedPlan.key,
-        });
-      }
+      // if (user.is_new) {
+      //   await applySponsorBonus({
+      //     userName: user.name,
+      //     sponsorId: user.sponsorId as any,
+      //     amount: debit,
+      //     plan: selectedPlan.key,
+      //   });
+      // }
 
       /* ────────── cash out transactions ────────── */
       const txManager = new TransactionManager();

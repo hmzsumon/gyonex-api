@@ -12,6 +12,12 @@ interface ApplyDepositBonusOptions {
   plan: string;
 }
 
+export interface ApplyDepositBonusResult {
+  applied: boolean;
+  bonus: number;
+  reason?: string;
+}
+
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -20,22 +26,58 @@ export const applyDepositBonus = async ({
   sponsorId,
   amount,
   plan,
-}: ApplyDepositBonusOptions): Promise<void> => {
+}: ApplyDepositBonusOptions): Promise<ApplyDepositBonusResult> => {
   try {
+    /* ────────── Validate deposit amount ────────── */
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { applied: false, bonus: 0, reason: "Invalid deposit amount" };
+    }
+
+    /* ────────── Load sponsor and related summary documents ────────── */
     const sponsor = await User.findById(sponsorId);
     if (!sponsor) {
       console.error(`Sponsor not found for user ${userName}`);
-      return;
+      return { applied: false, bonus: 0, reason: "Sponsor not found" };
     }
 
-    /* ────────── Check if sponsor is active ai trade ────────── */
     if (!sponsor.is_active_aiTrade) {
       console.error(`Sponsor ${sponsor.customerId} is not active.`);
-      return;
+      return { applied: false, bonus: 0, reason: "Sponsor is not active" };
     }
 
-    /* ────────── calculate sponsor bonus ────────── */
-    const bonus = round2(amount * 0.04); // 4%
+    const [wallet, userTeam, agentStatus] = await Promise.all([
+      UserWallet.findOne({ userId: sponsor._id }),
+      UserTeamSummary.findOne({ userId: sponsor._id }).select(
+        "totalReferralBonus",
+      ),
+      AgentStatus.findOne({ agentId: sponsor.agentId }),
+    ]);
+
+    if (!wallet) {
+      console.error(`Wallet not found for sponsor ${sponsor.customerId}`);
+      return { applied: false, bonus: 0, reason: "Sponsor wallet not found" };
+    }
+
+    if (!userTeam) {
+      console.error(`Team not found for sponsor ${sponsor.customerId}`);
+      return {
+        applied: false,
+        bonus: 0,
+        reason: "Sponsor team summary not found",
+      };
+    }
+
+    if (!agentStatus) {
+      console.error(`Agent status not found for sponsor ${sponsor.customerId}`);
+      return {
+        applied: false,
+        bonus: 0,
+        reason: "Sponsor agent status not found",
+      };
+    }
+
+    /* ────────── Calculate 4% sponsor deposit bonus ────────── */
+    const bonus = round2(amount * 0.04);
 
     if (isDev) {
       console.log(
@@ -48,48 +90,18 @@ export const applyDepositBonus = async ({
           sponsorCustomerId: sponsor.customerId,
           plan,
           depositAmount: round2(amount),
-          bonusPercent: "2%",
+          bonusPercent: "4%",
           bonusAmount: bonus,
-          sponsorActive: sponsor.is_active_aiTrade ? "YES" : "NO",
+          sponsorActive: "YES",
         },
       ]);
     }
 
-    /* ────────── Apply sponsor bonus ────────── */
-    const prevSponsorBalance = round2(sponsor.m_balance ?? 0);
-    const prevAddNewMember = sponsor.addNewMember ?? 0;
-
+    /* ────────── Update sponsor main balance ────────── */
     sponsor.m_balance = round2((sponsor.m_balance ?? 0) + bonus);
     await sponsor.save();
 
-    if (isDev) {
-      console.log("\nSponsor Main Balance Update:");
-      console.table([
-        {
-          sponsorCustomerId: sponsor.customerId,
-          previousBalance: prevSponsorBalance,
-          bonusAdded: bonus,
-          newBalance: round2(sponsor.m_balance ?? 0),
-          previousAddNewMember: prevAddNewMember,
-          newAddNewMember: sponsor.addNewMember,
-        },
-      ]);
-    }
-
-    /* ────────── Update sponsor wallet ────────── */
-    const wallet = await UserWallet.findOne({ userId: sponsor._id });
-    if (!wallet) {
-      console.error(`Wallet not found for sponsor ${sponsor.customerId}`);
-      return;
-    }
-
-    const prevWallet = {
-      totalEarning: round2(wallet.totalEarning ?? 0),
-      todayEarning: round2(wallet.todayEarning ?? 0),
-      thisMonthEarning: round2(wallet.thisMonthEarning ?? 0),
-      totalReferralBonus: round2(wallet.totalReferralBonus ?? 0),
-    };
-
+    /* ────────── Update sponsor wallet earnings ────────── */
     wallet.totalEarning = round2((wallet.totalEarning ?? 0) + bonus);
     wallet.todayEarning = round2((wallet.todayEarning ?? 0) + bonus);
     wallet.thisMonthEarning = round2((wallet.thisMonthEarning ?? 0) + bonus);
@@ -98,90 +110,13 @@ export const applyDepositBonus = async ({
     );
     await wallet.save();
 
-    if (isDev) {
-      console.log("\nSponsor Wallet Update:");
-      console.table([
-        {
-          sponsorCustomerId: sponsor.customerId,
-          bonus,
-          totalEarning_before: prevWallet.totalEarning,
-          totalEarning_after: round2(wallet.totalEarning ?? 0),
-          todayEarning_before: prevWallet.todayEarning,
-          todayEarning_after: round2(wallet.todayEarning ?? 0),
-          thisMonthEarning_before: prevWallet.thisMonthEarning,
-          thisMonthEarning_after: round2(wallet.thisMonthEarning ?? 0),
-          totalReferralBonus_before: prevWallet.totalReferralBonus,
-          totalReferralBonus_after: round2(wallet.totalReferralBonus ?? 0),
-        },
-      ]);
-    }
-
-    /* ────────── get Team and Update sponsor team summary ────────── */
-    const userTeam = await UserTeamSummary.findOne({
-      userId: sponsor._id,
-    }).select("totalReferralBonus");
-    if (!userTeam) {
-      console.error(`Team not found for sponsor ${sponsor.customerId}`);
-      return;
-    }
-
-    const prevTeamReferralBonus = round2(userTeam.totalReferralBonus ?? 0);
+    /* ────────── Update sponsor team referral summary ────────── */
     userTeam.totalReferralBonus = round2(
       (userTeam.totalReferralBonus ?? 0) + bonus,
     );
     await userTeam.save();
 
-    if (isDev) {
-      console.log("\nUser Team Summary Update:");
-      console.table([
-        {
-          sponsorCustomerId: sponsor.customerId,
-          totalReferralBonus_before: prevTeamReferralBonus,
-          bonusAdded: bonus,
-          totalReferralBonus_after: round2(userTeam.totalReferralBonus ?? 0),
-        },
-      ]);
-    }
-
-    /* ────────── Create cash-in transaction for sponsor ────────── */
-    const txManager = new TransactionManager();
-    await txManager.createTransaction({
-      userId: (sponsor._id as Types.ObjectId).toString(),
-      customerId: sponsor.customerId,
-      transactionType: "cashIn",
-      amount: bonus,
-      purpose: "Deposit Bonus",
-      description: `You have received a referral bonus of ${bonus.toFixed(
-        2,
-      )}$ from ${userName}'s plan ${plan} Trade.`,
-    });
-
-    if (isDev) {
-      console.log("\nTransaction Created:");
-      console.table([
-        {
-          sponsorCustomerId: sponsor.customerId,
-          transactionType: "cashIn",
-          purpose: "Deposit Bonus",
-          amount: bonus,
-          fromUser: userName,
-          plan,
-        },
-      ]);
-    }
-
-    /* ────────── get agent status and update totalReferralBonus ────────── */
-    const agentStatus = await AgentStatus.findOne({ agentId: sponsor.agentId });
-    if (!agentStatus) {
-      console.error(`Agent status not found for sponsor ${sponsor.customerId}`);
-      return;
-    }
-
-    const prevAgentStatus = {
-      totalReferralBonus: round2(agentStatus.totalReferralBonus ?? 0),
-      toDayReferralBonus: round2(agentStatus.toDayReferralBonus ?? 0),
-    };
-
+    /* ────────── Update sponsor agent referral summary ────────── */
     agentStatus.totalReferralBonus = round2(
       (agentStatus.totalReferralBonus ?? 0) + bonus,
     );
@@ -190,19 +125,20 @@ export const applyDepositBonus = async ({
     );
     await agentStatus.save();
 
-    if (isDev) {
-      console.log("\nAgent Status Update:");
-      console.table([
-        {
-          sponsorCustomerId: sponsor.customerId,
-          agentId: String(sponsor.agentId ?? ""),
-          totalReferralBonus_before: prevAgentStatus.totalReferralBonus,
-          totalReferralBonus_after: round2(agentStatus.totalReferralBonus ?? 0),
-          toDayReferralBonus_before: prevAgentStatus.toDayReferralBonus,
-          toDayReferralBonus_after: round2(agentStatus.toDayReferralBonus ?? 0),
-        },
-      ]);
+    /* ────────── Create sponsor cash-in transaction ────────── */
+    const txManager = new TransactionManager();
+    await txManager.createTransaction({
+      userId: (sponsor._id as Types.ObjectId).toString(),
+      customerId: sponsor.customerId,
+      transactionType: "cashIn",
+      amount: bonus,
+      purpose: "Deposit Bonus",
+      description: `You received a 4% deposit referral bonus of ${bonus.toFixed(
+        2,
+      )} USDT from ${userName}'s ${plan} deposit.`,
+    });
 
+    if (isDev) {
       console.log(
         "\n================ SPONSOR BONUS FINAL SUMMARY ================",
       );
@@ -224,7 +160,14 @@ export const applyDepositBonus = async ({
         "============================================================\n",
       );
     }
+
+    return { applied: true, bonus };
   } catch (error) {
     console.error("🔴 Failed to apply sponsor bonus:", error);
+    return {
+      applied: false,
+      bonus: 0,
+      reason: error instanceof Error ? error.message : "Unknown error",
+    };
   }
 };

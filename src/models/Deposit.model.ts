@@ -19,6 +19,9 @@ export interface IDeposit extends Document {
   currency: string;
   status: "pending" | "confirmed" | "expired" | "failed" | "approved";
   isApproved?: boolean;
+  sponsorBonusStatus?: "pending" | "processing" | "applied" | "failed";
+  sponsorBonusAppliedAt?: Date;
+  sponsorBonusAmount?: number;
   isExpired?: boolean;
   approvedAt?: Date;
   updatedAt?: Date;
@@ -98,6 +101,19 @@ const depositSchema = new Schema<IDeposit>(
     isApproved: {
       type: Boolean,
       default: false,
+    },
+    sponsorBonusStatus: {
+      type: String,
+      enum: ["pending", "processing", "applied", "failed"],
+      default: "pending",
+      index: true,
+    },
+    sponsorBonusAppliedAt: {
+      type: Date,
+    },
+    sponsorBonusAmount: {
+      type: Number,
+      default: 0,
     },
     isExpired: {
       type: Boolean,

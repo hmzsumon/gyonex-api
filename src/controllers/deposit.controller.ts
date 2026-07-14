@@ -3,7 +3,7 @@ import AgentStatus from "@/models/AgentStatus.model";
 import { Deposit } from "@/models/Deposit.model";
 import { Notification } from "@/models/Notification.model";
 import SystemStats from "@/models/SystemStats.model";
-import { User } from "@/models/user.model";
+import { IUser, User } from "@/models/user.model";
 import UserWallet from "@/models/UserWallet.model";
 import { createPayment } from "@/services/blockbee.service";
 import { sendEmail } from "@/services/email/emailService";
@@ -11,6 +11,7 @@ import { depositTemplate } from "@/services/email/templates/depositTemplate";
 import { sendPushToAdmins, sendPushToUser } from "@/services/push.service";
 import { typeHandler } from "@/types/express";
 import { ApiError } from "@/utils/ApiError";
+import { applyDepositBonus } from "@/utils/applyDepositBonus";
 import { catchAsync } from "@/utils/catchAsync";
 import TransactionManager from "@/utils/TransactionManager";
 import updateTeamSales from "@/utils/updateTeamSales";
@@ -30,6 +31,48 @@ declare global {
       }
     | undefined;
 }
+
+/* ────────── Apply sponsor bonus once per approved deposit ────────── */
+const applyApprovedDepositSponsorBonus = async (
+  depositId: Types.ObjectId,
+  user: IUser,
+  amount: number,
+  plan: string,
+): Promise<void> => {
+  if (!user.sponsorId || !Number.isFinite(amount) || amount <= 0) return;
+
+  const claimedDeposit = await Deposit.findOneAndUpdate(
+    {
+      _id: depositId,
+      isApproved: true,
+      sponsorBonusStatus: { $in: ["pending", "failed"] },
+    },
+    { $set: { sponsorBonusStatus: "processing" } },
+    { new: true },
+  );
+
+  if (!claimedDeposit) return;
+
+  const result = await applyDepositBonus({
+    userName: user.name,
+    sponsorId: user.sponsorId as Types.ObjectId,
+    amount,
+    plan,
+  });
+
+  await Deposit.findByIdAndUpdate(depositId, {
+    $set: result.applied
+      ? {
+          sponsorBonusStatus: "applied",
+          sponsorBonusAppliedAt: new Date(),
+          sponsorBonusAmount: result.bonus,
+        }
+      : {
+          sponsorBonusStatus: "failed",
+          sponsorBonusAmount: 0,
+        },
+  });
+};
 
 // Create Deposit wWith BlockBee
 export const createDepositWithBlockBee: typeHandler = catchAsync(
@@ -117,7 +160,20 @@ export const handleBlockBeeCallback: typeHandler = catchAsync(
     /* ────────── load deposit ────────── */
     const deposit = await Deposit.findOne({ orderId: depositId });
     if (!deposit) return next(new ApiError(404, "Deposit not found"));
-    if (deposit.isApproved) return res.status(200).send("✅ Already approved");
+
+    if (deposit.isApproved) {
+      const approvedUser = await User.findById(deposit.userId);
+      if (approvedUser && !deposit.isDemo) {
+        await applyApprovedDepositSponsorBonus(
+          deposit._id as Types.ObjectId,
+          approvedUser,
+          Number(deposit.amount ?? 0),
+          deposit.chain || "USDT",
+        );
+      }
+
+      return res.status(200).send("✅ Already approved");
+    }
 
     /* ────────── approve path ────────── */
     if (result === "sent" && Number(confirmations) >= 1) {
@@ -210,6 +266,14 @@ export const handleBlockBeeCallback: typeHandler = catchAsync(
         purpose: "Deposit",
         description: notifyText,
       });
+
+      /* ────────── Apply 4% sponsor deposit bonus ────────── */
+      await applyApprovedDepositSponsorBonus(
+        deposit._id as Types.ObjectId,
+        user,
+        amount,
+        deposit.chain || "USDT",
+      );
 
       /* ────────── socket emit ────────── */
       const uid = String(user._id);
@@ -513,7 +577,12 @@ export const adminCreateManualDeposit = catchAsync(async (req, res, next) => {
   };
 
   /* ────────── validate ────────── */
-  if (!customerId || !Number.isFinite(amount) || amount <= 0 || !isDemo) {
+  if (
+    !customerId ||
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    typeof isDemo !== "boolean"
+  ) {
     return next(new ApiError(400, "customerId এবং amount সঠিকভাবে দিন"));
   }
 
@@ -617,6 +686,16 @@ export const adminCreateManualDeposit = catchAsync(async (req, res, next) => {
     purpose: "Deposit",
     description: notifyText,
   });
+
+  /* ────────── Apply 4% sponsor bonus for real manual deposits ────────── */
+  if (!isDemo) {
+    await applyApprovedDepositSponsorBonus(
+      deposit._id as Types.ObjectId,
+      user,
+      amount,
+      "Manual USDT",
+    );
+  }
 
   /* ────────── socket emit ────────── */
   const uid = String(user._id);
