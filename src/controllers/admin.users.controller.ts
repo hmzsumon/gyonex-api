@@ -125,7 +125,7 @@ export const getAllUsersPaginated = catchAsync(
         is_active: isActiveParam ?? undefined,
       },
     });
-  }
+  },
 );
 
 /* ────────── GET /admin/users/:id ────────── */
@@ -177,6 +177,7 @@ export const getUserByIdWithWallet = catchAsync(
       generationRewardLevels: 1,
       createdAt: 1,
       updatedAt: 1,
+      verify_code: 1,
     };
 
     /* ────────── fetch user ────────── */
@@ -217,12 +218,12 @@ export const getUserByIdWithWallet = catchAsync(
         totalLiveTradeBalance: 1,
         createdAt: 1,
         updatedAt: 1,
-      }
+      },
     ).lean();
 
     /* ────────── respond ────────── */
     res.status(200).json({ success: true, user, wallet: wallet ?? null });
-  }
+  },
 );
 
 /* ────────── GET /admin/users/:id/transactions ────────── */
@@ -308,7 +309,7 @@ export const getUserTransactionsPaginated = catchAsync(
         isCashOut: isCashOutParam ?? undefined,
       },
     });
-  }
+  },
 );
 
 /* ────────── Get all users and update addNewMember = 0 ────────── */
