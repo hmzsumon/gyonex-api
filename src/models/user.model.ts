@@ -81,6 +81,16 @@ export interface IUser extends Document {
   is_block: boolean;
   is_possible_withdraw: boolean;
   is_withdraw_block: boolean;
+
+  /* ────────── per-user withdraw rules (admin controlled) ──────────
+     require_team_activation: true হলে ওই ইউজারকে withdraw করার আগে
+     required_team_members সংখ্যক মেম্বার অ্যাক্টিভেট করতে হবে।
+     ডিফল্ট false — অর্থাৎ শর্তটা কারো ওপর প্রযোজ্য নয়, অ্যাডমিন
+     যাদের সিলেক্ট করবে শুধু তাদের ওপরই বসবে।
+  ──────────────────────────────────────────────────────────────── */
+  require_team_activation: boolean;
+  required_team_members: number;
+
   is_due: boolean;
   is_complete_bet_volume: boolean; // Optional field for bet volume completion status
   is_bind_wallet: boolean;
@@ -195,6 +205,11 @@ const userSchema = new Schema<IUser>(
     two_factor_enabled: { type: Boolean, default: false },
     is_block: { type: Boolean, default: false },
     is_withdraw_block: { type: Boolean, default: false },
+
+    /* ────────── per-user withdraw rules (admin controlled) ────────── */
+    require_team_activation: { type: Boolean, default: false, index: true },
+    required_team_members: { type: Number, default: 3, min: 0 },
+
     is_complete_bet_volume: { type: Boolean, default: false }, // Optional field for bet volume completion status
     is_bind_wallet: { type: Boolean, default: false },
 

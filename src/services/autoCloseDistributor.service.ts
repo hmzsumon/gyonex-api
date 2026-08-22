@@ -26,7 +26,7 @@ const fmt = (n: number) => n.toFixed(2);
 
 /* ── short, English messages ────────────────────────────── */
 const msgUser = (custId: string, amt: number) =>
-  `AI trade profit credited: ${fmt(amt)} USDT. (ID: ${custId})`;
+  `Smart trade profit credited: ${fmt(amt)} USDT. (ID: ${custId})`;
 
 const msgParent = (childCustId: string, label: string, amt: number) =>
   `Level ${label} commission from ${childCustId}: ${fmt(amt)} USDT.`;
@@ -42,7 +42,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
   /* ── idempotency guard ─────────────────────────────────── */
   const guard = await AiPosition.updateOne(
     { _id: pos._id, distributedAt: { $exists: false } as any },
-    { $set: { distributedAt: new Date() } }
+    { $set: { distributedAt: new Date() } },
   ).exec();
   if (guard.modifiedCount === 0) return { ok: true, skipped: true };
 
@@ -162,9 +162,9 @@ export async function distributeOnAutoCloseSimple(posId: string) {
         customerId: childCustId,
         transactionType: "cashIn",
         amount: perUserAmt,
-        purpose: "Ai Trade Profit",
+        purpose: "Trade Profit",
         description: msgUser(childCustId, perUserAmt),
-      })
+      }),
     );
 
     /* ── parents 30% split (index 0..4 => 30/25/20/15/10) ── */
@@ -196,13 +196,13 @@ export async function distributeOnAutoCloseSimple(posId: string) {
         const incs = teamIncByParent.get(pid) || {};
         const levelKey = `level_${i + 1}`;
         incs[`${levelKey}.aiTradeCommission`] = round2(
-          (incs[`${levelKey}.aiTradeCommission`] || 0) + amt
+          (incs[`${levelKey}.aiTradeCommission`] || 0) + amt,
         );
         incs[`${levelKey}.todayAiTradeCommission`] = round2(
-          (incs[`${levelKey}.todayAiTradeCommission`] || 0) + amt
+          (incs[`${levelKey}.todayAiTradeCommission`] || 0) + amt,
         );
         incs[`teamTotalAiTradeCommission`] = round2(
-          (incs[`teamTotalAiTradeCommission`] || 0) + amt
+          (incs[`teamTotalAiTradeCommission`] || 0) + amt,
         );
         teamIncByParent.set(pid, incs);
 
@@ -214,9 +214,9 @@ export async function distributeOnAutoCloseSimple(posId: string) {
             customerId: "", // optional: fill with parent's customerId if you fetch it
             transactionType: "cashIn",
             amount: amt,
-            purpose: "Ai Trade Commission",
+            purpose: "Trade Commission",
             description: msgParent(childCustId, label, amt),
-          })
+          }),
         );
       }
     }
@@ -305,7 +305,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
         totalAiTradeCommission: parentsTotalCommission,
       },
     },
-    { upsert: true }
+    { upsert: true },
   ).exec();
 
   /* ── apply company income (10% per account, once) ──────── */
@@ -313,7 +313,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
   await SystemStats.updateOne(
     {},
     { $inc: { "income.aiTradeCharge": companyTotal } },
-    { upsert: true }
+    { upsert: true },
   ).exec();
 
   /* ── create all transactions ───────────────────────────── */

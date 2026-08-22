@@ -15,7 +15,7 @@ import { catchAsync } from "@/utils/catchAsync";
 import TransactionManager from "@/utils/TransactionManager";
 import updateTeamWithdraw from "@/utils/updateTeamWithdraw";
 
-const WITHDRAW_CHARGE = 0.05; // 5%
+const WITHDRAW_CHARGE = 0.08; // 8%
 
 /* ── Create New Withdraw Request ───────────────────────────────── */
 export const newWithdrawRequest: typeHandler = catchAsync(

@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from "express";
 
 interface CustomError extends Error {
   statusCode?: number;
+  meta?: Record<string, unknown>;
 }
 
 /* ────────── global error handler ────────── */
@@ -59,5 +60,7 @@ export const errorHandler = (
     success: false,
     error: message,
     message,
+    /* ApiError এর meta (যেমন code: "KYC_REQUIRED") ক্লায়েন্টে পাঠাই */
+    ...(err.meta || {}),
   });
 };

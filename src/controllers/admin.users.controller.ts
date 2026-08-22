@@ -61,6 +61,15 @@ export const getAllUsersPaginated = catchAsync(
     if (isActiveParam === "true") filter.is_active = true;
     if (isActiveParam === "false") filter.is_active = false;
 
+    /* ────────── filter by team-activation rule ────────── */
+    const teamRuleParam =
+      typeof req.query.require_team_activation === "string"
+        ? req.query.require_team_activation
+        : undefined;
+    if (teamRuleParam === "true") filter.require_team_activation = true;
+    if (teamRuleParam === "false")
+      filter.require_team_activation = { $ne: true };
+
     /* ────────── projection (no sensitive fields) ────────── */
     const projection: ProjectionType<IUser> = {
       _id: 1,
@@ -76,6 +85,9 @@ export const getAllUsersPaginated = catchAsync(
       is_active: 1,
       is_block: 1,
       is_withdraw_block: 1,
+      require_team_activation: 1,
+      required_team_members: 1,
+      addNewMember: 1,
       email_verified: 1,
       two_factor_enabled: 1,
       kyc_verified: 1,
@@ -123,6 +135,7 @@ export const getAllUsersPaginated = catchAsync(
         search: rawSearch || undefined,
         role: role || undefined,
         is_active: isActiveParam ?? undefined,
+        require_team_activation: teamRuleParam ?? undefined,
       },
     });
   },
@@ -166,6 +179,9 @@ export const getUserByIdWithWallet = catchAsync(
       two_factor_enabled: 1,
       is_block: 1,
       is_withdraw_block: 1,
+      require_team_activation: 1,
+      required_team_members: 1,
+      addNewMember: 1,
       is_complete_bet_volume: 1,
       is_bind_wallet: 1,
       is_active_aiTrade: 1,
@@ -323,3 +339,138 @@ export const getAllUsersAndUpdateAddNewMember = catchAsync(async (req, res) => {
   }
   res.json({ success: true });
 });
+
+/* ══════════════════════════════════════════════════════════════
+   Per-user withdraw rules (admin controlled)
+   ────────────────────────────────────────────────────────────
+   Team-activation শর্তটা ডিফল্টভাবে কারো ওপর প্রযোজ্য নয়।
+   অ্যাডমিন এখান থেকে নির্দিষ্ট ইউজার সিলেক্ট করে শর্তটা বসাতে
+   বা তুলে নিতে পারে।
+   ══════════════════════════════════════════════════════════════ */
+
+/* ────────── helper: payload normalize + validate ────────── */
+const buildWithdrawRuleUpdate = (body: any) => {
+  const update: Record<string, unknown> = {};
+
+  if (typeof body?.require_team_activation === "boolean") {
+    update.require_team_activation = body.require_team_activation;
+  }
+
+  if (body?.required_team_members !== undefined) {
+    const n = Number(body.required_team_members);
+    if (!Number.isInteger(n) || n < 0 || n > 100) {
+      throw new ApiError(
+        400,
+        "required_team_members must be an integer between 0 and 100",
+      );
+    }
+    update.required_team_members = n;
+  }
+
+  /* ────────── bonus: withdraw block toggle (আগে কোনো endpoint ছিল না) ────────── */
+  if (typeof body?.is_withdraw_block === "boolean") {
+    update.is_withdraw_block = body.is_withdraw_block;
+  }
+
+  return update;
+};
+
+/* ────────── PATCH /admin/users/:id/withdraw-rules ────────── */
+export const updateUserWithdrawRules = catchAsync(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return next(new ApiError(400, "Invalid user id"));
+    }
+
+    const update = buildWithdrawRuleUpdate(req.body);
+
+    if (!Object.keys(update).length) {
+      return next(
+        new ApiError(
+          400,
+          "Nothing to update. Send require_team_activation, required_team_members or is_withdraw_block.",
+        ),
+      );
+    }
+
+    const user = await User.findByIdAndUpdate(
+      id,
+      { $set: update },
+      {
+        new: true,
+        runValidators: true,
+        projection: {
+          _id: 1,
+          name: 1,
+          customerId: 1,
+          addNewMember: 1,
+          require_team_activation: 1,
+          required_team_members: 1,
+          is_withdraw_block: 1,
+        },
+      },
+    ).lean();
+
+    if (!user) return next(new ApiError(404, "User not found"));
+
+    res.status(200).json({
+      success: true,
+      message: "Withdraw rules updated successfully",
+      user,
+    });
+  },
+);
+
+/* ────────── PATCH /admin/users/withdraw-rules/bulk ──────────
+   body: { userIds: string[], require_team_activation?: boolean,
+           required_team_members?: number, is_withdraw_block?: boolean }
+─────────────────────────────────────────────────────────────── */
+export const bulkUpdateUserWithdrawRules = catchAsync(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const { userIds } = req.body ?? {};
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return next(new ApiError(400, "userIds must be a non-empty array"));
+    }
+
+    if (userIds.length > 500) {
+      return next(new ApiError(400, "Maximum 500 users per request"));
+    }
+
+    const invalid = userIds.filter((u: any) => !mongoose.isValidObjectId(u));
+    if (invalid.length) {
+      return next(
+        new ApiError(
+          400,
+          `Invalid user id(s): ${invalid.slice(0, 5).join(", ")}`,
+        ),
+      );
+    }
+
+    const update = buildWithdrawRuleUpdate(req.body);
+
+    if (!Object.keys(update).length) {
+      return next(
+        new ApiError(
+          400,
+          "Nothing to update. Send require_team_activation, required_team_members or is_withdraw_block.",
+        ),
+      );
+    }
+
+    const result = await User.updateMany(
+      { _id: { $in: userIds } },
+      { $set: update },
+      { runValidators: true },
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Withdraw rules updated for ${result.modifiedCount} user(s)`,
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+    });
+  },
+);

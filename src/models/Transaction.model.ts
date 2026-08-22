@@ -37,7 +37,9 @@ export type TransactionPurpose =
   | "Generation Reward"
   | "Game Betting"
   | "Ai Trade Profit"
+  | "Trade Profit"
   | "Ai Trade Commission"
+  | "Trade Commission"
   | "Create Ai Account"
   | "game:bet"
   | "game:win"
@@ -144,7 +146,9 @@ const transactionSchema = new Schema<ITransaction>(
         "game:admin_adjustment",
         "game:payout",
         "Ai Trade Profit",
+        "Trade Profit",
         "Ai Trade Commission",
+        "Trade Commission",
         "Create Ai Account",
         "Transfer to Trade",
         "Transfer to Wallet",

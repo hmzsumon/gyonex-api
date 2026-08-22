@@ -8,18 +8,26 @@ import {
   rejectWithdrawRequest,
 } from "@/controllers/withdraw.controller";
 import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
+import { requireKycVerified } from "@/middlewares/kyc.middleware";
+import { requireTeamActivation } from "@/middlewares/teamActivation.middleware";
 import { Router } from "express";
 const router = Router();
 
 // create new withdraw request
-router.post("/new-withdraw-request", isAuthenticatedUser, newWithdrawRequest);
+router.post(
+  "/new-withdraw-request",
+  isAuthenticatedUser,
+  requireKycVerified, // 🔒 KYC approved না হলে এখানেই আটকে যাবে
+  requireTeamActivation, // 🔒 শুধু admin-selected ইউজারদের জন্য
+  newWithdrawRequest,
+);
 
 // get all withdraws for admin
 router.get(
   "/get-all-withdraws-for-admin",
   isAuthenticatedUser,
   authorizeRoles("admin"),
-  getAllWithdrawsForAdmin
+  getAllWithdrawsForAdmin,
 );
 
 // get withdraw by id
@@ -30,7 +38,7 @@ router.get(
   "/admin/pending-withdraws",
   isAuthenticatedUser,
   authorizeRoles("admin"),
-  getAllPendingWithdrawsForAdmin
+  getAllPendingWithdrawsForAdmin,
 );
 
 // approve withdraw request
@@ -38,7 +46,7 @@ router.put(
   "/admin/withdraw/approve",
   isAuthenticatedUser,
   authorizeRoles("admin"),
-  approveWithdrawRequest
+  approveWithdrawRequest,
 );
 
 // reject withdraw request
@@ -46,7 +54,7 @@ router.put(
   "/admin/withdraw/reject",
   isAuthenticatedUser,
   authorizeRoles("admin"),
-  rejectWithdrawRequest
+  rejectWithdrawRequest,
 );
 
 /* ────────── get my withdraws ────────── */
