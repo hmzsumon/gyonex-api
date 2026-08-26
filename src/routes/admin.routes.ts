@@ -1,13 +1,17 @@
 import {
   adminLogin,
   checkUtilityFunction,
+  createAiPlan,
   createPaymentMethod,
+  deleteAiPlan,
   getAdminDashboardSummary,
+  getAllAiPlansAdmin,
   getAllUsers,
   getAllUsersByAgentIdAndChangeEmail,
   getUserById,
   initialSetup,
   resetDailyTasks,
+  updateAiPlan,
   updateAllUsersTaskReport,
 } from "@/controllers/admin.controller";
 import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
@@ -67,6 +71,39 @@ router.get(
   "/admin/users-by-agent-id-and-change-email",
 
   getAllUsersByAgentIdAndChangeEmail
+);
+
+/* ────────── AI Plan Management ────────── */
+// list all plans (active + inactive)
+router.get(
+  "/admin/ai-plans",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  getAllAiPlansAdmin
+);
+
+// create a new plan (auto-activates one account for the admin)
+router.post(
+  "/admin/ai-plans",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  createAiPlan
+);
+
+// update price / name / subtitle / rows / order / active state
+router.patch(
+  "/admin/ai-plans/:id",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  updateAiPlan
+);
+
+// delete a plan (blocked while accounts are linked to it)
+router.delete(
+  "/admin/ai-plans/:id",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  deleteAiPlan
 );
 
 export default router;

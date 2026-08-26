@@ -551,3 +551,168 @@ export const getAllUsersByAgentIdAndChangeEmail: typeHandler = catchAsync(
     });
   },
 );
+
+/* ──────────────────────────────────────────────────────────────────────────
+   AI Plan Management (Admin) — list/create/update/delete
+   On create: an active AiAccount for this plan is auto-created for the
+   admin who created it (admin-only, not for regular users).
+────────────────────────────────────────────────────────────────────────── */
+
+// ── Get All AI Plans (active + inactive) ─────────────────────────────────
+export const getAllAiPlansAdmin: typeHandler = catchAsync(async (_req, res) => {
+  const items = await AiPlan.find().sort({ sortOrder: 1, amount: 1 });
+
+  res.status(200).json({ success: true, items });
+});
+
+// ── Create AI Plan (+ auto-create an active account for the admin) ───────
+export const createAiPlan: typeHandler = catchAsync(async (req, res, next) => {
+  const { key, title, subtitle, amount, rows, sortOrder, isActive } =
+    req.body as {
+      key: string;
+      title: string;
+      subtitle: string;
+      amount: number;
+      rows?: { label: string; value: string }[];
+      sortOrder?: number;
+      isActive?: boolean;
+    };
+
+  if (!key || !title || !subtitle || amount === undefined) {
+    return next(
+      new ApiError(400, "key, title, subtitle and amount are required"),
+    );
+  }
+
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    return next(new ApiError(400, "Invalid amount"));
+  }
+
+  const normalizedKey = String(key).trim().toLowerCase();
+
+  const existing = await AiPlan.findOne({ key: normalizedKey });
+  if (existing) {
+    return next(new ApiError(409, "A plan with this key already exists"));
+  }
+
+  const plan = await AiPlan.create({
+    key: normalizedKey,
+    title,
+    subtitle,
+    amount: amt,
+    rows: rows ?? [],
+    sortOrder: sortOrder ?? 0,
+    isActive: isActive ?? true,
+  });
+
+  // ✅ Auto-activate one account for the admin who created this plan.
+  // Admin-only — never applies to regular users.
+  let adminAccount = null as any;
+  const admin = req.user!;
+
+  if (admin.role === "admin" && plan.isActive) {
+    const accountNumber = await generateAccountNumber();
+
+    adminAccount = await AiAccount.create({
+      userId: admin._id,
+      customerId: admin.customerId,
+      accountNumber,
+      plan: plan.key,
+      balance: plan.amount,
+      equity: plan.amount,
+      role: "admin",
+      planPrice: plan.amount,
+      status: "active",
+      mode: "ai",
+      is_active: true,
+    });
+
+    await Promise.all([
+      UserWalletModel.updateOne(
+        { userId: admin._id },
+        { $inc: { totalAiTradeBalance: plan.amount } },
+      ),
+      SystemStats.updateOne(
+        {},
+        {
+          $inc: {
+            totalAiTradeBalance: plan.amount,
+            todayAiTradeBalance: plan.amount,
+          },
+        },
+      ),
+    ]);
+  }
+
+  res.status(201).json({
+    success: true,
+    message: adminAccount
+      ? "AI plan created and an admin account was auto-activated for it."
+      : "AI plan created.",
+    plan,
+    adminAccount,
+  });
+});
+
+// ── Update AI Plan (price/name/subtitle/rows/order/active state) ─────────
+export const updateAiPlan: typeHandler = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  if (!id) return next(new ApiError(400, "Plan id is required"));
+
+  const plan = await AiPlan.findById(id);
+  if (!plan) return next(new ApiError(404, "AI plan not found"));
+
+  const { title, subtitle, amount, rows, sortOrder, isActive } = req.body as {
+    title?: string;
+    subtitle?: string;
+    amount?: number;
+    rows?: { label: string; value: string }[];
+    sortOrder?: number;
+    isActive?: boolean;
+  };
+
+  // 🔒 `key` is intentionally not editable — existing accounts/positions
+  // reference plans by key, renaming it would orphan them.
+
+  if (title !== undefined) plan.title = title;
+  if (subtitle !== undefined) plan.subtitle = subtitle;
+  if (rows !== undefined) plan.rows = rows;
+  if (sortOrder !== undefined) plan.sortOrder = sortOrder;
+  if (isActive !== undefined) plan.isActive = isActive;
+
+  if (amount !== undefined) {
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return next(new ApiError(400, "Invalid amount"));
+    }
+    plan.amount = amt;
+  }
+
+  await plan.save();
+
+  res.status(200).json({ success: true, message: "AI plan updated.", plan });
+});
+
+// ── Delete AI Plan ─────────────────────────────────────────────────────
+export const deleteAiPlan: typeHandler = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  if (!id) return next(new ApiError(400, "Plan id is required"));
+
+  const plan = await AiPlan.findById(id);
+  if (!plan) return next(new ApiError(404, "AI plan not found"));
+
+  const linkedAccounts = await AiAccount.countDocuments({ plan: plan.key });
+  if (linkedAccounts > 0) {
+    return next(
+      new ApiError(
+        400,
+        `This plan has ${linkedAccounts} account(s) linked to it and cannot be deleted. Deactivate it instead (set isActive to false).`,
+      ),
+    );
+  }
+
+  await plan.deleteOne();
+
+  res.status(200).json({ success: true, message: "AI plan deleted." });
+});
