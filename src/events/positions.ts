@@ -1,6 +1,6 @@
 // src/events/positions.ts
 import { IAiPosition } from "@/models/AiPosition.model";
-import { io as socketIO } from "@/socket";
+import { io as socketIO, userRoom } from "@/socket";
 
 export type OpenedPayload = {
   _id: string;
@@ -47,8 +47,8 @@ export function emitPositionOpened(
     reason,
   };
 
-  // ইউজার রুম
-  io.to(String(pos.userId)).emit("position:opened", payload);
+  // ইউজার রুম (⚠️ socket/index.ts-এর সাথে সামঞ্জস্যপূর্ণ "u:<id>" ফরম্যাট)
+  io.to(userRoom(String(pos.userId))).emit("position:opened", payload);
   // (ঐচ্ছিক) অ্যাকাউন্ট রুম
   io.to(`account:${String(pos.accountId)}`).emit("position:opened", payload);
 

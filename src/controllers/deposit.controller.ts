@@ -276,9 +276,11 @@ export const handleBlockBeeCallback: typeHandler = catchAsync(
       );
 
       /* ────────── socket emit ────────── */
+      // ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট।
       const uid = String(user._id);
+      const room = `u:${uid}`;
       if (global?.io?.to) {
-        global.io.to(String(user._id)).emit("deposit-update", {
+        global.io.to(room).emit("deposit-update", {
           success: true,
           message: "Deposit confirmed ✅",
           amount,
@@ -286,16 +288,14 @@ export const handleBlockBeeCallback: typeHandler = catchAsync(
           depositId: deposit._id,
         });
 
-        global.io.to(String(uid)).emit("notifications:new", userNotification);
+        global.io.to(room).emit("notifications:new", userNotification);
         const unreadCount = await Notification.countDocuments({
           user_id: uid,
           is_read: false,
         });
-        global.io
-          .to(String(uid))
-          .emit("notifications:count", { count: unreadCount });
+        global.io.to(room).emit("notifications:count", { count: unreadCount });
 
-        global.io.to(String(user._id)).emit("user-notification", {
+        global.io.to(room).emit("user-notification", {
           success: true,
           message: "Deposit confirmed ✅",
           notification: userNotification,
@@ -399,7 +399,7 @@ export const testSocketConnection: typeHandler = catchAsync(
       url: `/deposit-history`,
     });
 
-    global.io.to(String(user._id)).emit("user-notification", {
+    global.io.to(`u:${String(user._id)}`).emit("user-notification", {
       success: true,
       message: "Deposit confirmed ✅",
       notification: userNotification,
@@ -697,12 +697,14 @@ export const adminCreateManualDeposit = catchAsync(async (req, res, next) => {
     );
   }
 
-  /* ────────── socket emit ────────── */
+  /* ────────── socket emit ──────────
+   * ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট।
+   */
   const uid = String(user._id);
+  const room = `u:${uid}`;
 
-  /* ────────── socket emit ────────── */
   if (global?.io?.to) {
-    global.io.to(String(user._id)).emit("deposit-update", {
+    global.io.to(room).emit("deposit-update", {
       success: true,
       message: "Deposit confirmed ✅",
       amount,
@@ -710,16 +712,14 @@ export const adminCreateManualDeposit = catchAsync(async (req, res, next) => {
       depositId: deposit._id,
     });
 
-    global.io.to(String(uid)).emit("notifications:new", userNotification);
+    global.io.to(room).emit("notifications:new", userNotification);
     const unreadCount = await Notification.countDocuments({
       user_id: uid,
       is_read: false,
     });
-    global.io
-      .to(String(uid))
-      .emit("notifications:count", { count: unreadCount });
+    global.io.to(room).emit("notifications:count", { count: unreadCount });
 
-    global.io.to(String(user._id)).emit("user-notification", {
+    global.io.to(room).emit("user-notification", {
       success: true,
       message: "Deposit confirmed ✅",
       notification: userNotification,

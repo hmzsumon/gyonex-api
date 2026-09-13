@@ -8,6 +8,7 @@ export type TransactionPurpose =
   | "Withdraw Completed"
   | "Referral Bonus"
   | "Buy Lottery"
+  | "Lottery Gift"
   | "Global Bonus"
   | "Generation Bonus"
   | "Level Bonus"
@@ -111,6 +112,7 @@ const transactionSchema = new Schema<ITransaction>(
         "Withdraw Completed",
         "Referral Bonus",
         "Buy Lottery",
+        "Lottery Gift",
         "Global Bonus",
         "Generation Bonus",
         "Level Bonus",

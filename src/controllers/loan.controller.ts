@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { AdminNotification } from "@/models/AdminNotification.model";
 import { AdminLog } from "@/models/index";
 import { Loan } from "@/models/Loan.model";
+import LoanSetting from "@/models/LoanSetting.model";
 import { Notification } from "@/models/Notification.model";
 import { User } from "@/models/user.model";
 import UserWallet from "@/models/UserWallet.model";
@@ -573,8 +574,60 @@ export const applyForLoan: typeHandler = catchAsync(async (req, res) => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────
+   Loan repayment settings (admin-editable fee %)
+   GET  /loans/repayment-settings           (any logged-in user, read-only)
+   GET  /loans/admin/repayment-settings     (admin)
+   PUT  /loans/admin/repayment-settings     (admin)
+───────────────────────────────────────────────────────────────────────── */
+export const getLoanRepaymentSettings: typeHandler = catchAsync(
+  async (_req, res) => {
+    const settings = await LoanSetting.getSingleton();
+    res.status(200).json({
+      success: true,
+      settings: { repaymentFeePercent: settings.repaymentFeePercent },
+    });
+  },
+);
+
+export const getAdminLoanRepaymentSettings: typeHandler = catchAsync(
+  async (_req, res) => {
+    const settings = await LoanSetting.getSingleton();
+    res.status(200).json({ success: true, settings });
+  },
+);
+
+export const updateAdminLoanRepaymentSettings: typeHandler = catchAsync(
+  async (req, res) => {
+    const { repaymentFeePercent } = req.body;
+
+    if (
+      repaymentFeePercent == null ||
+      Number(repaymentFeePercent) < 0 ||
+      Number(repaymentFeePercent) > 100
+    ) {
+      throw new ApiError(400, "repaymentFeePercent must be between 0 and 100");
+    }
+
+    const settings = await LoanSetting.getSingleton();
+    settings.repaymentFeePercent = Number(repaymentFeePercent);
+    settings.updatedBy = req.user?._id as any;
+    await settings.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Loan repayment fee updated successfully",
+      settings,
+    });
+  },
+);
+
+/* ─────────────────────────────────────────────────────────────────────────
    USER: Repay loan
    POST /loans/:loanId/repay
+
+   ইউজার $X রিপে করতে চাইলে, তার main balance থেকে $X + (fee%) কাটা হয়,
+   কিন্তু লোনের totalPaid-এ শুধু $X-ই যোগ হয় (ফি লোনের দেনা কমায় না —
+   এটা প্ল্যাটফর্মের আলাদা সার্ভিস চার্জ, অ্যাডমিন প্যানেল থেকে % কন্ট্রোল হয়)।
 ───────────────────────────────────────────────────────────────────────── */
 export const repayLoan: typeHandler = catchAsync(async (req, res) => {
   const userId = getAuthUserId(req);
@@ -606,13 +659,22 @@ export const repayLoan: typeHandler = catchAsync(async (req, res) => {
 
   const userObjectId = asObjectId(user._id);
 
-  if (toMoney(user.m_balance) < payAmount) {
-    throw new ApiError(400, "Insufficient main balance");
+  /* ────────── admin-configurable repayment fee ────────── */
+  const loanSettings = await LoanSetting.getSingleton();
+  const feePercent = toMoney(loanSettings.repaymentFeePercent);
+  const repaymentFee = Number(((payAmount * feePercent) / 100).toFixed(2));
+  const totalCharge = Number((payAmount + repaymentFee).toFixed(2));
+
+  if (toMoney(user.m_balance) < totalCharge) {
+    throw new ApiError(
+      400,
+      `Insufficient main balance. You need $${totalCharge.toFixed(2)} (repayment $${payAmount.toFixed(2)} + ${feePercent}% fee $${repaymentFee.toFixed(2)}).`,
+    );
   }
 
-  /* ────────── Repayment from main balance ────────── */
+  /* ────────── Repayment + fee, both from main balance ────────── */
   user.last_m_balance = toMoney(user.m_balance);
-  user.m_balance = Math.max(0, toMoney(user.m_balance) - payAmount);
+  user.m_balance = Math.max(0, toMoney(user.m_balance) - totalCharge);
   await user.save();
 
   await UserWallet.findOneAndUpdate(
@@ -635,23 +697,30 @@ export const repayLoan: typeHandler = catchAsync(async (req, res) => {
     { $set: { remainingLoanAmount: 0 } },
   );
 
+  // ফি লোনের দেনা কমায় না — শুধু payAmount-ই totalPaid-এ যোগ হয়
   loan.totalPaid = toMoney(loan.totalPaid) + payAmount;
 
   const txManager = new TransactionManager();
   const tx = await txManager.createTransaction({
     userId: userObjectId,
     customerId: user.customerId,
-    amount: payAmount,
+    amount: totalCharge,
     transactionType: "cashOut",
     purpose: "Transfer",
-    description: `Loan repayment for ${loan.loanType} loan`,
+    description:
+      repaymentFee > 0
+        ? `Loan repayment of $${payAmount.toFixed(2)} for ${loan.loanType} loan (+ ${feePercent}% fee $${repaymentFee.toFixed(2)})`
+        : `Loan repayment for ${loan.loanType} loan`,
   });
 
   loan.repaymentHistory.push({
     amount: payAmount,
     paidAt: new Date(),
     transactionId: asObjectId(tx._id),
-    note: "Loan repayment from main balance",
+    note:
+      repaymentFee > 0
+        ? `Loan repayment from main balance (+ $${repaymentFee.toFixed(2)} fee)`
+        : "Loan repayment from main balance",
   });
 
   const isCompleted = loan.totalPaid >= toMoney(loan.totalRepayable);
@@ -708,8 +777,18 @@ export const repayLoan: typeHandler = catchAsync(async (req, res) => {
 
   res.json({
     success: true,
-    message: `$${payAmount} repayment successful`,
+    message:
+      repaymentFee > 0
+        ? `$${payAmount.toFixed(2)} repayment successful ($${totalCharge.toFixed(2)} charged incl. ${feePercent}% fee)`
+        : `$${payAmount.toFixed(2)} repayment successful`,
     data: loan,
+    payment: {
+      amount: payAmount,
+      feePercent,
+      fee: repaymentFee,
+      totalCharged: totalCharge,
+      balance: user.m_balance,
+    },
   });
 });
 

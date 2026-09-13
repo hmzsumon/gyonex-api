@@ -188,21 +188,23 @@ export const registerUser: typeHandler = catchAsync(async (req, res, next) => {
   });
 
   // ✅ Optional realtime notification emit
+  // ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট।
   if (global?.io?.to) {
     const uid = String(user._id);
+    const room = `u:${uid}`;
 
-    global.io.to(uid).emit("notifications:new", welcomeBonusNotification);
+    global.io.to(room).emit("notifications:new", welcomeBonusNotification);
 
     const unreadCount = await Notification.countDocuments({
       user_id: user._id,
       is_read: false,
     });
 
-    global.io.to(uid).emit("notifications:count", {
+    global.io.to(room).emit("notifications:count", {
       count: unreadCount,
     });
 
-    global.io.to(uid).emit("user-notification", {
+    global.io.to(room).emit("user-notification", {
       success: true,
       message: welcomeBonusMessage,
       notification: welcomeBonusNotification,
@@ -916,6 +918,33 @@ export const getUserBalance: typeHandler = catchAsync(
     res.status(200).json({
       success: true,
       balance: user.m_balance,
+    });
+  },
+);
+
+/* ────────── Get my total trade income (AI + Live trade profit & commission) ────────── */
+export const getMyTradeIncome: typeHandler = catchAsync(
+  async (req, res, next) => {
+    const userId = req.user?._id;
+    if (!userId) {
+      return next(new ApiError(401, "User not authenticated"));
+    }
+
+    const wallet = await UserWallet.findOne({ userId }).select(
+      "totalAiTradeProfit totalAiTradeCommission totalLiveTradeProfit totalLiveTradeCommission",
+    );
+
+    const breakdown = {
+      aiTradeProfit: wallet?.totalAiTradeProfit || 0,
+      aiTradeCommission: wallet?.totalAiTradeCommission || 0,
+      liveTradeProfit: wallet?.totalLiveTradeProfit || 0,
+      liveTradeCommission: wallet?.totalLiveTradeCommission || 0,
+    };
+
+    res.status(200).json({
+      success: true,
+      totalTradeIncome: wallet ? wallet.totalTradeIncome : 0,
+      breakdown,
     });
   },
 );

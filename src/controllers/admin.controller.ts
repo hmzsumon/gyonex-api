@@ -20,8 +20,14 @@ import { generateUniqueId } from "@/utils/generateCustomerId";
 import AgentStatus from "@/models/AgentStatus.model";
 import AiAccount from "@/models/AiAccount.model";
 import AiPlan from "@/models/AiPlan.model";
+import { Deposit } from "@/models/Deposit.model";
+import Kyc from "@/models/kyc.model";
+import LuckyCard from "@/models/LuckyCard.model";
+import LuckyPurchase from "@/models/LuckyPurchase.model";
 import PaymentMethod from "@/models/PaymentMethod.model";
+import Transaction from "@/models/Transaction.model";
 import VipTierLog from "@/models/VipTierLog.model";
+import Withdraw from "@/models/Withdraw.model";
 import { AI_PLAN_SEEDS } from "@/utils/aiPlans";
 import distributeGenerationBonus from "@/utils/distributeGenarationBonus";
 import { generateAccountNumber } from "@/utils/generateAccountNumber";
@@ -309,32 +315,122 @@ export const getAdminDashboardSummary: typeHandler = catchAsync(
       return next(new ApiError(404, "System stats not found"));
     }
 
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    /* ── SystemStats can drift from the live collections (e.g. user growth
+       isn't incremented on every signup path), so headline counts and
+       "needs attention" numbers are computed fresh here instead of trusting
+       the cached aggregate for those specific fields. ────────────────── */
+    const [
+      totalUsers,
+      todayNewUsers,
+      totalActiveUsers,
+      kycVerifiedCount,
+      kycPendingCount,
+      withdrawPendingAgg,
+      depositPendingCount,
+      luckyStakedAgg,
+      luckyPaidAgg,
+      luckyCardsIssued,
+      recentUsers,
+      recentTransactions,
+    ] = await Promise.all([
+      User.countDocuments({ role: "user" }),
+      User.countDocuments({ role: "user", createdAt: { $gte: startOfToday } }),
+      User.countDocuments({ role: "user", is_active: true }),
+      User.countDocuments({ role: "user", kyc_verified: true }),
+      Kyc.countDocuments({ status: "pending" }),
+      Withdraw.aggregate([
+        { $match: { status: "pending" } },
+        { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: "$amount" } } },
+      ]),
+      Deposit.countDocuments({ status: "pending" }),
+      LuckyPurchase.aggregate([
+        { $group: { _id: null, sum: { $sum: "$totalPrice" } } },
+      ]),
+      LuckyCard.aggregate([
+        { $match: { status: "opened" } },
+        { $group: { _id: null, sum: { $sum: "$prizeAmount" } } },
+      ]),
+      LuckyCard.countDocuments(),
+      User.find({ role: "user" })
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .select("name customerId email m_balance createdAt"),
+      Transaction.find()
+        .sort({ createdAt: -1 })
+        .limit(8)
+        .populate("userId", "name customerId"),
+    ]);
+
     const dashboardData = {
+      /* ── users ────────────────────────────────────────────────────── */
+      totalUsers,
+      todayNewUsers,
+      totalActiveUsers,
+      todayActiveUsers: company.users.activeToday || 0,
+      kycVerifiedUsers: kycVerifiedCount,
+      kycPending: kycPendingCount,
+
+      /* ── deposits ─────────────────────────────────────────────────── */
       totalDeposits: company.deposits.total || 0,
       todayDeposits: company.deposits.today || 0,
       totalBlockBeeDepDeposits: company.deposits.blockbeeReceivedTotal || 0,
       todayBlockBeeDepDeposits: company.deposits.blockbeeReceivedToday || 0,
       totalDepositFee: company.deposits.blockbeeFee || 0,
+      depositPending: depositPendingCount,
+
+      /* ── withdrawals ──────────────────────────────────────────────── */
       totalWithdraw: company.withdrawals.total || 0,
       todayWithdraw: company.withdrawals.today || 0,
       totalNetWithdraw: company.withdrawals.netTotal || 0,
       totalWithdrawFee: company.withdrawals.totalCharge || 0,
-      totalUsers: company.users.total || 0,
-      todayNewUsers: company.users.todayNew || 0,
-      totalActiveUsers: company.users.activeTotal || 0,
-      todayActiveUsers: company.users.activeToday || 0,
+      withdrawPendingCount: withdrawPendingAgg[0]?.count || 0,
+      withdrawPendingAmount: withdrawPendingAgg[0]?.amount || 0,
 
+      /* ── income / cost ────────────────────────────────────────────── */
+      totalIncome: company.income.total || 0,
+      totalCost: company.costs.total || 0,
+      netProfit: (company.income.total || 0) - (company.costs.total || 0),
+
+      /* ── trading ──────────────────────────────────────────────────── */
       totalLiveTradeBalance: company.totalLiveTradeBalance || 0,
       todayLiveTradeBalance: company.todayLiveTradeBalance || 0,
-
       todayAiTradeBalance: company.todayAiTradeBalance || 0,
       totalAiTradeBalance: company.totalAiTradeBalance || 0,
-
       totalAiTradeCommission: company.totalAiTradeCommission || 0,
       todayAiTradeCommission: company.todayAiTradeCommission || 0,
-
       totalAiTradeProfit: company.totalAiTradeProfit || 0,
       todayAiTradeProfit: company.todayAiTradeProfit || 0,
+
+      /* ── lucky card snapshot ──────────────────────────────────────── */
+      luckyCardsIssued,
+      luckyCardStaked: luckyStakedAgg[0]?.sum || 0,
+      luckyCardPaidOut: luckyPaidAgg[0]?.sum || 0,
+
+      /* ── staking cut ──────────────────────────────────────────────── */
+      stakingSystemCutTotal: company.stakingSystemCutTotal || 0,
+
+      /* ── recent activity ──────────────────────────────────────────── */
+      recentUsers: recentUsers.map((u: any) => ({
+        _id: u._id,
+        name: u.name,
+        customerId: u.customerId,
+        email: u.email,
+        m_balance: u.m_balance,
+        createdAt: u.createdAt,
+      })),
+      recentTransactions: recentTransactions.map((t: any) => ({
+        _id: t._id,
+        user: t.userId?.name || "",
+        customerId: t.userId?.customerId || t.customerId || "",
+        amount: t.amount,
+        transactionType: t.transactionType,
+        purpose: t.purpose,
+        description: t.description,
+        createdAt: t.createdAt,
+      })),
     };
 
     res.status(200).json({

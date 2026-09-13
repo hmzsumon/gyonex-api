@@ -10,6 +10,7 @@ import {
   getMyAssetDetails,
   getMyTeamMembers,
   getMyTeamSummary,
+  getMyTradeIncome,
   getMyTransactions,
   getTeamMembersByLevel,
   getUserBalance,
@@ -101,6 +102,7 @@ router.get(
 );
 
 router.get("/wallet/me", isAuthenticatedUser, getUserBalance);
+router.get("/wallet/trade-income", isAuthenticatedUser, getMyTradeIncome);
 
 router.put(
   "/get-user-by-customer-id/:id",

@@ -802,16 +802,18 @@ export const createAiPosition: typeHandler = catchAsync(async (req, res) => {
       });
 
       if (global?.io?.to) {
+        // ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট।
         const uid = String(acc.userId);
+        const room = `u:${uid}`;
 
-        global.io.to(uid).emit("notifications:new", notif);
+        global.io.to(room).emit("notifications:new", notif);
 
         const unread = await Notification.countDocuments({
           user_id: uid,
           is_read: false,
         });
 
-        global.io.to(uid).emit("notifications:count", { count: unread });
+        global.io.to(room).emit("notifications:count", { count: unread });
       }
     }
 

@@ -1,11 +1,14 @@
 import {
   approveWithdrawRequest,
   geMyWithdraws,
+  getAdminWithdrawSettings,
   getAllPendingWithdrawsForAdmin,
   getAllWithdrawsForAdmin,
   getWithdrawById,
+  getWithdrawSettings,
   newWithdrawRequest,
   rejectWithdrawRequest,
+  updateAdminWithdrawSettings,
 } from "@/controllers/withdraw.controller";
 import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
 import { requireKycVerified } from "@/middlewares/kyc.middleware";
@@ -59,5 +62,23 @@ router.put(
 
 /* ────────── get my withdraws ────────── */
 router.get("/my-withdraws", isAuthenticatedUser, geMyWithdraws);
+
+/* ────────── withdraw settings (fee / min / max / quick amounts / limit) ────────── */
+// client-facing (read-only)
+router.get("/withdraw/settings", isAuthenticatedUser, getWithdrawSettings);
+
+// admin management
+router.get(
+  "/admin/withdraw/settings",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  getAdminWithdrawSettings,
+);
+router.put(
+  "/admin/withdraw/settings",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  updateAdminWithdrawSettings,
+);
 
 export default router;

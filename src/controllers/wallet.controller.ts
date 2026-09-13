@@ -148,7 +148,8 @@ export const sendMoney: typeHandler = catchAsync(async (req, res, next) => {
     });
 
     if (global?.io?.to) {
-      global.io.to(String(recipient._id)).emit("user-notification", {
+      // ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট।
+      global.io.to(`u:${String(recipient._id)}`).emit("user-notification", {
         success: true,
         message: "Deposit confirmed ✅",
         notification: notifyCreated,

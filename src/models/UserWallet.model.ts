@@ -54,6 +54,14 @@ export interface IUserWallet extends Document {
   totalLoanAmount: number;
   totalLoanPay: number;
   remainingLoanAmount: number;
+
+  // ── Total trade income (computed) ──────────────────────────────────────
+  // AI trade profit + AI trade commission + Live trade profit + Live trade
+  // commission — সব ধরনের ট্রেড ইনকাম এক জায়গায়। এটা কোনো আলাদা $inc দিয়ে
+  // রাখা হয়নি (কোড জুড়ে অনেক জায়গায় $inc/bulkWrite দিয়ে সাব-ফিল্ড আপডেট হয়,
+  // সবগুলো জায়গায় হাত দেওয়া ঝুঁকিপূর্ণ) — বরং প্রতিবার doc read/save হওয়ার
+  // সময় বর্তমান সাব-ফিল্ড থেকে হিসাব করা হয়, তাই সবসময় সঠিক থাকে।
+  totalTradeIncome: number;
 }
 
 const walletSchema = new Schema<IUserWallet>(
@@ -114,7 +122,34 @@ const walletSchema = new Schema<IUserWallet>(
     totalLoanPay: { type: Number, default: 0 },
     remainingLoanAmount: { type: Number, default: 0 },
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
+  },
 );
+
+/* ── Total trade income helper ────────────────────────────────────────────
+ * AI trade profit + AI trade commission + Live trade profit + Live trade
+ * commission — একসাথে সব ট্রেড ইনকাম। `.lean()` কোয়েরির জন্যও ব্যবহারযোগ্য
+ * (virtual getter শুধু hydrated ডকুমেন্টেই কাজ করে)।
+ * ────────────────────────────────────────────────────────────────────── */
+export function computeTotalTradeIncome(w: {
+  totalAiTradeProfit?: number;
+  totalAiTradeCommission?: number;
+  totalLiveTradeProfit?: number;
+  totalLiveTradeCommission?: number;
+}): number {
+  const sum =
+    (w.totalAiTradeProfit || 0) +
+    (w.totalAiTradeCommission || 0) +
+    (w.totalLiveTradeProfit || 0) +
+    (w.totalLiveTradeCommission || 0);
+  return Math.round((sum + Number.EPSILON) * 100) / 100;
+}
+
+walletSchema.virtual("totalTradeIncome").get(function (this: IUserWallet) {
+  return computeTotalTradeIncome(this);
+});
 
 export default mongoose.model<IUserWallet>("UserWallet", walletSchema);

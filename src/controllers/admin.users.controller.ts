@@ -1,6 +1,6 @@
 /* ────────── imports ────────── */
 import Transaction, { ITransaction } from "@/models/Transaction.model";
-import UserWalletModel from "@/models/UserWallet.model";
+import UserWalletModel, { computeTotalTradeIncome } from "@/models/UserWallet.model";
 import { IUser, User } from "@/models/user.model";
 import { ApiError } from "@/utils/ApiError";
 import { catchAsync } from "@/utils/catchAsync";
@@ -238,7 +238,11 @@ export const getUserByIdWithWallet = catchAsync(
     ).lean();
 
     /* ────────── respond ────────── */
-    res.status(200).json({ success: true, user, wallet: wallet ?? null });
+    res.status(200).json({
+      success: true,
+      user,
+      wallet: wallet ? { ...wallet, totalTradeIncome: computeTotalTradeIncome(wallet) } : null,
+    });
   },
 );
 

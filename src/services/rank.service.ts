@@ -155,23 +155,24 @@ export async function claimRankBonus(userId: string, key: RankKey) {
     url: `/rank-reward/${key}`,
   });
 
-  /* ──────────  socket events (best-effort)  ────────── */
+  /* ──────────  socket events (best-effort)  ──────────
+   * ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট।
+   */
   if (global?.io?.to) {
-    global.io.to(String(uid)).emit("notifications:new", notification);
+    const room = `u:${String(uid)}`;
+    global.io.to(room).emit("notifications:new", notification);
     const unreadCount = await Notification.countDocuments({
       user_id: uid,
       is_read: false,
     });
-    global.io
-      .to(String(uid))
-      .emit("notifications:count", { count: unreadCount });
+    global.io.to(room).emit("notifications:count", { count: unreadCount });
 
-    global.io.to(String(uid)).emit("user-notification", {
+    global.io.to(room).emit("user-notification", {
       success: true,
       message: "Rank reward credited",
       meta: { key, reward },
     });
-    global.io.to(String(uid)).emit("wallet-update", {
+    global.io.to(room).emit("wallet-update", {
       success: true,
       m_balance: user.m_balance,
       rankEarning: userWallet.rankEarning,

@@ -9,6 +9,39 @@ export let io: SocketIOServer | undefined;
 export const quoteRoom = (sym: string) => `q:${sym.toUpperCase()}`;
 export const userRoom = (uid: string | number) => `u:${uid}`;
 
+/* ────────── presence tracking (online/offline) ──────────
+ * এক ইউজার একাধিক ট্যাব/ডিভাইস থেকে কানেক্ট করতে পারে, তাই
+ * userId → এর সব সকেট-আইডির সেট রাখা হয়। সেট খালি হলেই ইউজার অফলাইন।
+ */
+const onlineSockets = new Map<string, Set<string>>(); // userId -> Set<socketId>
+const socketToUser = new Map<string, string>(); // socketId -> userId
+
+function markOnline(socketId: string, userId: string) {
+  socketToUser.set(socketId, userId);
+  if (!onlineSockets.has(userId)) onlineSockets.set(userId, new Set());
+  onlineSockets.get(userId)!.add(socketId);
+}
+
+function markOffline(socketId: string) {
+  const userId = socketToUser.get(socketId);
+  if (!userId) return;
+  socketToUser.delete(socketId);
+  const set = onlineSockets.get(userId);
+  if (!set) return;
+  set.delete(socketId);
+  if (set.size === 0) onlineSockets.delete(userId);
+}
+
+/** এই মুহূর্তে ইউজারটির অন্তত একটা ট্যাব/ডিভাইস কানেক্টেড আছে কিনা */
+export function isUserOnline(userId: string | number): boolean {
+  return !!onlineSockets.get(String(userId))?.size;
+}
+
+/** এখন যেসব userId অনলাইনে আছে */
+export function getOnlineUserIds(): string[] {
+  return [...onlineSockets.keys()];
+}
+
 /* ────────── attach socket.io to HTTP server ────────── */
 export const attach = (server: HTTPServer): SocketIOServer => {
   io = new SocketIOServer(server, {
@@ -21,9 +54,11 @@ export const attach = (server: HTTPServer): SocketIOServer => {
 
     /* ── (A) user room ── */
     socket.on("join-room", (userId: string) => {
-      const room = userRoom(String(userId));
+      const uid = String(userId);
+      const room = userRoom(uid);
       socket.join(room);
-      console.log(`📦 ${socket.id} joined room: ${room}`);
+      markOnline(socket.id, uid);
+      console.log(`📦 ${socket.id} joined room: ${room} (online)`);
     });
 
     /* ── (B) quote subscribe/unsubscribe ── */
@@ -56,6 +91,7 @@ export const attach = (server: HTTPServer): SocketIOServer => {
     socket.on("ping:client", () => socket.emit("pong:server", Date.now()));
 
     socket.on("disconnect", () => {
+      markOffline(socket.id);
       console.log(`🔴 Socket disconnected: ${socket.id}`);
     });
   });

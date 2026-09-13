@@ -1,13 +1,16 @@
 import {
   applyForLoan,
   approveLoan,
+  getAdminLoanRepaymentSettings,
   getAllLoansForAdmin,
   getLoanPackages,
+  getLoanRepaymentSettings,
   getMyLoanCountdown,
   getMyLoans,
   rejectLoan,
   repayLoan,
   runLoanDefaults,
+  updateAdminLoanRepaymentSettings,
 } from "@/controllers/loan.controller";
 import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
 import { Router } from "express";
@@ -38,6 +41,9 @@ router.post("/apply", isAuthenticatedUser, applyForLoan);
 
 /* ────────── repay loan ────────── */
 router.post("/:loanId/repay", isAuthenticatedUser, repayLoan);
+
+/* ────────── loan repayment fee (read-only for user) ────────── */
+router.get("/repayment-settings", isAuthenticatedUser, getLoanRepaymentSettings);
 
 /* ─────────────────────────────────────────────────────────────────────────
    ADMIN ROUTES
@@ -74,6 +80,20 @@ router.post(
   isAuthenticatedUser,
   authorizeRoles("admin"),
   runLoanDefaults,
+);
+
+/* ────────── loan repayment fee % (admin-editable) ────────── */
+router.get(
+  "/admin/repayment-settings",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  getAdminLoanRepaymentSettings,
+);
+router.put(
+  "/admin/repayment-settings",
+  isAuthenticatedUser,
+  authorizeRoles("admin"),
+  updateAdminLoanRepaymentSettings,
 );
 
 export default router;

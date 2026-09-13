@@ -68,20 +68,19 @@ const notifyUserKycStatus = async ({
   });
 
   if ((global as any).io) {
-    (global as any).io
-      .to(String(user._id))
-      .emit("notifications:new", notification);
+    // ⚠️ socket/index.ts-এ ইউজার রুমের নাম "u:<id>" — এখানেও একই ফরম্যাট
+    // ব্যবহার করা হচ্ছে, নাহলে কেউ এই রুমে জয়েন করা না থাকায় ইভেন্ট কেউ পায় না।
+    const room = `u:${String(user._id)}`;
+    (global as any).io.to(room).emit("notifications:new", notification);
 
     const unread = await Notification.countDocuments({
       user_id: user._id,
       is_read: false,
     });
 
-    (global as any).io
-      .to(String(user._id))
-      .emit("notifications:count", { count: unread });
+    (global as any).io.to(room).emit("notifications:count", { count: unread });
 
-    (global as any).io.to(String(user._id)).emit("user-notification", {
+    (global as any).io.to(room).emit("user-notification", {
       success: true,
       message,
       notification,

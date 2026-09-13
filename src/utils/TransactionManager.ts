@@ -99,6 +99,7 @@ class TransactionManager {
       "Company Bonus",
       "Profit",
       "Lottery Win",
+      "Lottery Gift",
       "Rank Bonus",
       "Trade Profit",
       "Balance Transfer",
