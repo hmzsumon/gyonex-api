@@ -35,6 +35,8 @@ export interface ILotteryEvent extends Document<Types.ObjectId> {
   drawDate: Date;
   status: LotteryStatus;
   isAutoDraw: boolean;
+  drawPreviewToken?: string;
+  ticketSequence: number;
   createdBy?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -76,6 +78,8 @@ const LotteryEventSchema = new Schema<ILotteryEvent>(
       index: true,
     },
     isAutoDraw: { type: Boolean, default: true },
+    drawPreviewToken: { type: String, select: false },
+    ticketSequence: { type: Number, default: 0, min: 0, select: false },
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true },

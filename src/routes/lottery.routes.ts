@@ -3,6 +3,7 @@ import {
   buyLotteryTickets,
   createLottery,
   drawLotteryWinner,
+  previewLotteryDraw,
   getActiveLottery,
   getAllLotteriesForAdmin,
   getLotteryEvents,
@@ -16,6 +17,8 @@ import { Router } from "express";
 
 /* ────────── lottery router instance ────────── */
 const router = Router();
+
+router.post("/admin/events/:id/draw/preview", isAuthenticatedUser, authorizeRoles("admin"), previewLotteryDraw);
 
 /* ────────── user lottery routes ────────── */
 router.get("/events", isAuthenticatedUser, getLotteryEvents);

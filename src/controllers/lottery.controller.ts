@@ -6,6 +6,7 @@ import { LotteryWinner } from "@/models/LotteryWinner.model";
 import {
   buyTicketsForEvent,
   drawLotteryEvent,
+  previewLotteryEvent,
   getLotteryEventSummary,
 } from "@/services/lottery.service";
 import { typeHandler } from "@/types/express";
@@ -113,14 +114,14 @@ export const getMyLotteryTickets: typeHandler = catchAsync(
 
 /* ────────── get public lottery winner list ────────── */
 export const getLotteryWinners: typeHandler = catchAsync(async (req, res) => {
-  const page = Number(req.query.page || 1);
-  const limit = Number(req.query.limit || 10);
+  const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+  const limit = Math.min(100, Math.max(1, Math.floor(Number(req.query.limit) || 10)));
   const skip = (page - 1) * limit;
 
   const [winners, total] = await Promise.all([
-    LotteryWinner.find()
+    LotteryWinner.find().select("-winnerName -userId -drawnBy")
       .populate("eventId", "title eventType drawDate")
-      .sort({ drawnAt: -1 })
+      .sort({ drawnAt: -1, eventId: 1, prizeRank: 1, _id: 1 })
       .skip(skip)
       .limit(limit),
     LotteryWinner.countDocuments(),
@@ -294,7 +295,12 @@ export const updateLottery: typeHandler = catchAsync(async (req, res, next) => {
     );
   }
 
-  const event = await LotteryEvent.findByIdAndUpdate(req.params.id, req.body, {
+  const allowed = ["title", "description", "eventType", "ticketPrice", "prizeAsset", "prizeTiers", "prizeAmount", "winnerCount", "maxTickets", "startDate", "endDate", "drawDate", "status", "isAutoDraw"];
+  if (req.body.status && !["draft", "upcoming", "open", "cancelled"].includes(req.body.status)) {
+    throw new ApiError(400, "Use draw confirmation to publish results");
+  }
+  const updates = Object.fromEntries(allowed.filter(key => req.body[key] !== undefined).map(key => [key, req.body[key]]));
+  const event = await LotteryEvent.findOneAndUpdate({ _id: req.params.id, status: { $ne: "drawn" } }, { $set: updates, $unset: { drawPreviewToken: 1 } }, {
     new: true,
     runValidators: true,
   });
@@ -326,18 +332,12 @@ export const drawLotteryWinner: typeHandler = catchAsync(
       return next(new ApiError(401, "Admin not authenticated"));
     }
 
-    const result = await drawLotteryEvent(req.params.id, adminId.toString());
-
-    await AdminLog.create({
-      adminId,
-      action: "lottery_event_drawn",
-      targetId: result.event._id,
-      targetType: "LotteryEvent",
-      details: {
-        totalPool: result.totalPool,
-        winners: result.winners.length,
-      },
-    });
+    const { previewToken, ticketIds, confirmed } = req.body;
+    if (confirmed !== true || typeof previewToken !== "string" || !previewToken ||
+        !Array.isArray(ticketIds) || !ticketIds.length || ticketIds.some(id => typeof id !== "string")) {
+      throw new ApiError(400, "A valid preview and explicit confirmation are required");
+    }
+    const result = await drawLotteryEvent(req.params.id, adminId.toString(), { previewToken, ticketIds });
 
     res.status(200).json({
       success: true,
@@ -475,3 +475,8 @@ export const getSingleLotteryForAdmin: typeHandler = catchAsync(
     });
   },
 );
+
+export const previewLotteryDraw: typeHandler = catchAsync(async (req, res) => {
+  const data = await previewLotteryEvent(req.params.id);
+  res.status(200).json({ success: true, data });
+});

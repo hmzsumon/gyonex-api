@@ -2,6 +2,12 @@ import { NextFunction, Request, Response } from "express";
 
 interface CustomError extends Error {
   statusCode?: number;
+  status?: number;
+  code?: number;
+  errors?: Record<string, { message?: string }>;
+  keyValue?: Record<string, unknown>;
+  keyPattern?: Record<string, unknown>;
+  value?: unknown;
   meta?: Record<string, unknown>;
 }
 
@@ -12,8 +18,16 @@ export const errorHandler = (
   res: Response,
   _next: NextFunction,
 ) => {
-  let statusCode = err.statusCode || 500;
-  let message = err.message || "Internal Server Error";
+  if (res.headersSent) return _next(err);
+  const error = err && typeof err === "object" ? err : new Error("Internal Server Error");
+  const requestedStatus = (error as CustomError).statusCode ?? (error as CustomError).status;
+  let statusCode =
+    typeof requestedStatus === "number" &&
+    Number.isInteger(requestedStatus) &&
+    requestedStatus >= 400 && requestedStatus <= 599
+      ? requestedStatus
+      : 500;
+  let message = error.message || "Internal Server Error";
 
   /* Server console এ real error দেখা যাবে */
   console.error("[API_ERROR]", {
@@ -21,46 +35,49 @@ export const errorHandler = (
     method: req.method,
     statusCode,
     message,
-    stack: err.stack,
+    stack: error.stack,
   });
 
   // Handle Mongoose validation errors
-  if (err.name === "ValidationError") {
-    message = Object.values((err as any).errors)
-      .map((val: any) => val.message)
-      .join(", ");
+  if (error.name === "ValidationError") {
+    message = Object.values((error as CustomError).errors || {})
+      .map((val) => val?.message)
+      .filter(Boolean)
+      .join(", ") || message;
     statusCode = 400;
   }
 
   // Handle CastError (e.g. invalid MongoDB _id)
-  if (err.name === "CastError") {
-    message = `Resource not found with id: ${(err as any).value}`;
+  if (error.name === "CastError") {
+    message = `Resource not found with id: ${(error as CustomError).value}`;
     statusCode = 404;
   }
 
   // Handle Duplicate Key error
-  if ((err as any).code === 11000) {
-    const field = Object.keys((err as any).keyValue)[0];
-    message = `Duplicate field value entered: ${field}`;
+  if ((error as CustomError).code === 11000) {
+    // MongoBulkWriteError (e.g. insertMany) need not have keyValue.
+    const duplicate = error as CustomError;
+    const field = Object.keys(duplicate.keyValue || duplicate.keyPattern || {})[0];
+    message = field ? `Duplicate field value entered: ${field}` : "This record already exists. Please refresh and try again.";
     statusCode = 400;
   }
 
   // Handle JWT errors
-  if (err.name === "JsonWebTokenError") {
+  if (error.name === "JsonWebTokenError") {
     message = "Invalid token. Please log in again.";
     statusCode = 401;
   }
 
-  if (err.name === "TokenExpiredError") {
+  if (error.name === "TokenExpiredError") {
     message = "Your token has expired. Please log in again.";
     statusCode = 401;
   }
 
   res.status(statusCode).json({
+    /* Preserve structured ApiError metadata, e.g. KYC_REQUIRED. */
+    ...((error as CustomError).meta || {}),
     success: false,
     error: message,
     message,
-    /* ApiError এর meta (যেমন code: "KYC_REQUIRED") ক্লায়েন্টে পাঠাই */
-    ...(err.meta || {}),
   });
 };
