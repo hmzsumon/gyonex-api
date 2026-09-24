@@ -1,3 +1,5 @@
+import { getStakingSettings } from "@/models/StakingSetting.model";
+import { isStakingProfitDay, stakingDayKey } from "@/utils/stakingPolicy";
 import SpotWallet from "@/models/SpotWallet.model";
 import StakingProfitLog from "@/models/StakingProfitLog.model";
 import StakingSubscription from "@/models/StakingSubscription.model";
@@ -58,12 +60,12 @@ async function createMainBalanceTransaction(opts: {
   }
 }
 
-const dayKey = (d: Date) => {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-};
+const dayKey = stakingDayKey;
+
+// Existing subscriptions must retain their original ledger keys to avoid
+// paying the same calendar slot twice after introducing Dhaka scheduling.
+const legacyDayKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 
 const addDays = (date: Date, days: number) =>
   new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
@@ -102,6 +104,8 @@ type RunProfitOptions = {
 export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
   const now = opts.runAt ?? new Date();
   const todayKey = dayKey(now);
+  const settings = await getStakingSettings();
+  const canPayToday = settings.profitEnabled && isStakingProfitDay(now, settings.policyHistory);
   const dryRun = !!opts.dryRun;
   const limit = opts.limit ?? 10000;
 
@@ -110,7 +114,7 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
 
   console.log("🟡 [staking-profit] running:", todayKey, "dryRun=", dryRun);
 
-  const subs = await StakingSubscription.find({ status: "active" }).limit(
+  const subs = await StakingSubscription.find({ status: "active", cancelLocked: { $ne: true } }).limit(
     limit
   );
 
@@ -132,24 +136,28 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
 
       // ✅ Day0 include (+1)
       const eligiblePayDays = Math.min(daysPassed + 1, sub.termDays);
-      const alreadyPaid = Number(sub.paidDays || 0);
-      const dueDays = eligiblePayDays - alreadyPaid;
+      // Walk calendar days: paidDays counts payouts, not weekends or paused days.
+      const dueDays = eligiblePayDays;
 
       // 1) profits (catch-up supported)
-      if (dueDays > 0) {
+      if (canPayToday && dueDays > 0) {
+        const paidLogs = await StakingProfitLog.find({ subscriptionId: sub._id, type: "profit" }).select("dayKey").lean();
+        const paidKeys = new Set(paidLogs.map((log) => log.dayKey));
         for (let i = 0; i < dueDays; i++) {
-          const payDayIndex = alreadyPaid + i; // ✅ can be 0
+          const payDayIndex = i; // ✅ can be 0
           const payDate = addDays(startedAt, payDayIndex);
-          const payKey = dayKey(payDate);
+          const payKey = sub.profitTimezone === "Asia/Dhaka" ? dayKey(payDate) : legacyDayKey(payDate);
 
           if (payKey > todayKey) break;
+          if (!isStakingProfitDay(payDate, settings.policyHistory)) continue;
+          if (paidKeys.has(payKey)) continue;
 
           const grossProfitQty = round8(
             Number(sub.principalQty) * (Number(sub.dailyProfitPercent) / 100)
           );
           if (grossProfitQty <= 0) continue;
 
-          const userShare = getUserShare(Number(sub.termDays));
+          const userShare = sub.userSharePercent ?? getUserShare(Number(sub.termDays));
           const userProfitQty = round8(grossProfitQty * userShare);
 
           const remainderQty = round8(grossProfitQty - userProfitQty);
@@ -361,6 +369,7 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
             _id: sub._id,
             status: "active",
             principalReturnLocked: { $ne: true },
+            cancelLocked: { $ne: true },
           },
           {
             $set: {

@@ -1,3 +1,5 @@
+import { getStakingSettings, publicStakingSettings } from "@/models/StakingSetting.model";
+import { cancellationAmounts } from "@/utils/stakingPolicy";
 // src/controllers/staking.controller.ts
 import SpotWallet from "@/models/SpotWallet.model";
 import StakingPlan from "@/models/StakingPlan.model";
@@ -81,11 +83,13 @@ export const getStakingPlans = catchAsync(async (_req, res) => {
   const plans = await StakingPlan.find({ isActive: true }).sort({
     termDays: 1,
   });
-  res.status(200).json({ success: true, items: plans });
+  res.status(200).json({ success: true, items: plans, settings: publicStakingSettings(await getStakingSettings()) });
 });
 
 // ✅ POST /staking/subscribe
 export const subscribeStaking = catchAsync(async (req, res, next) => {
+  const settings = await getStakingSettings();
+  if (!settings.stakingEnabled) return next(new ApiError(400, "Staking is currently paused"));
   const rawUserId = req.user?._id;
   const customerId = req.user?.customerId;
 
@@ -183,6 +187,8 @@ export const subscribeStaking = catchAsync(async (req, res, next) => {
 
       dailyProfitPercent,
       totalProfitPercent,
+      userSharePercent: plan.userSharePercent,
+      profitTimezone: "Asia/Dhaka",
 
       paidDays: 0,
       totalProfitQty: 0,
@@ -295,9 +301,11 @@ export const cancelMySubscription = catchAsync(async (req, res, next) => {
   if (!Types.ObjectId.isValid(id)) return next(new ApiError(400, "Invalid id"));
   // console.log("cancelMySubscription", id);
 
+  const settings = await getStakingSettings();
+
   // ✅ lock to prevent double cancel
   const sub = await StakingSubscription.findOneAndUpdate(
-    { _id: id, userId, status: "active", cancelLocked: { $ne: true } },
+    { _id: id, userId, status: "active", principalReturnLocked: { $ne: true }, cancelLocked: { $ne: true } },
     { $set: { cancelLocked: true, cancelLockedAt: new Date() } },
     { new: true }
   );
@@ -305,18 +313,12 @@ export const cancelMySubscription = catchAsync(async (req, res, next) => {
   if (!sub)
     return next(new ApiError(400, "Subscription not found or not active"));
 
-  // ✅ baseDaily = 1-day plan daily
-  const flexPlan = await StakingPlan.findOne({ termDays: 1, isActive: true });
-  const baseDaily = 0.32;
-
+  const baseDaily = 0;
   const paidDays = Number(sub.paidDays || 0);
   const fixedDaily = Number(sub.dailyProfitPercent || 0);
-
-  const penaltyPercent = sub.totalProfitQty - paidDays * baseDaily;
-
+  const penaltyPercent = settings.cancellationFeePercent;
   const principalQty = Number(sub.principalQty || 0);
-  const penaltyQty = round8((principalQty * penaltyPercent) / 100);
-  const returnQty = round8(Math.max(0, principalQty - penaltyQty));
+  const { penaltyQty, returnQty } = cancellationAmounts(principalQty, penaltyPercent);
 
   // console.log({
   //   principalQty: principalQty,

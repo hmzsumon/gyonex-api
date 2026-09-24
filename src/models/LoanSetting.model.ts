@@ -17,7 +17,7 @@ export interface ILoanSetting {
 const loanSettingSchema = new Schema<ILoanSetting>(
   {
     key: { type: String, default: "global", unique: true },
-    repaymentFeePercent: { type: Number, default: 8, min: 0, max: 100 },
+    repaymentFeePercent: { type: Number, default: 0, min: 0, max: 100 },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true },

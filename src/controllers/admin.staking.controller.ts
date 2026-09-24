@@ -1,3 +1,5 @@
+import StakingSetting, { getStakingSettings, publicStakingSettings } from "@/models/StakingSetting.model";
+import { stakingDayKey } from "@/utils/stakingPolicy";
 import { runStakingProfitJob } from "@/crons/stakingProfitJob";
 import StakingPlan from "@/models/StakingPlan.model";
 import { ApiError } from "@/utils/ApiError";
@@ -40,13 +42,16 @@ export const adminUpsertStakingPlan = catchAsync(async (req, res, next) => {
   );
 
   const totalProfitPercent = round8(dailyProfitPercent * termDays);
+  const userSharePercent = Number(req.body?.userSharePercent ?? getUserSharePercent(termDays));
+  if (!Number.isFinite(userSharePercent) || userSharePercent < 0 || userSharePercent > 1)
+    return next(new ApiError(400, "User share must be between 0 and 1"));
 
   const minAmount =
     req.body?.minAmount == null ? undefined : Number(req.body?.minAmount);
 
   const isActive = parseBool(req.body?.isActive);
 
-  if (!Number.isFinite(termDays) || termDays <= 0)
+  if (!Number.isInteger(termDays) || termDays <= 0)
     return next(new ApiError(400, "Invalid termDays"));
 
   if (!Number.isFinite(dailyProfitPercent) || dailyProfitPercent < 0)
@@ -63,13 +68,14 @@ export const adminUpsertStakingPlan = catchAsync(async (req, res, next) => {
     {
       $set: {
         termDays,
+        userSharePercent,
         dailyProfitPercent,
         totalProfitPercent,
         ...(minAmount != null ? { minAmount } : {}),
         ...(isActive != null ? { isActive } : {}),
       },
     },
-    { upsert: true, new: true }
+    { upsert: true, new: true, runValidators: true }
   );
 
   res.status(200).json({ success: true, item: updated });
@@ -91,7 +97,7 @@ const USER_SHARE = new Map<number, number>([
 const getUserSharePercent = (termDays: number) => {
   const v = USER_SHARE.get(termDays);
   if (v == null) {
-    throw new ApiError(400, `Unsupported termDays: ${termDays}`);
+    return 1;
   }
   return v;
 };
@@ -121,7 +127,7 @@ export const adminBulkUpsertStakingPlans = catchAsync(
 
         const totalProfitPercent = round8(dailyProfitPercent * termDays);
 
-        const userSharePercent = getUserSharePercent(termDays);
+        const userSharePercent = Number(p?.userSharePercent ?? getUserSharePercent(termDays));
 
         const minAmount =
           p?.minAmount == null || p?.minAmount === ""
@@ -143,7 +149,7 @@ export const adminBulkUpsertStakingPlans = catchAsync(
 
       // ✅ validation
       for (const p of plans) {
-        if (!Number.isFinite(p.termDays) || p.termDays <= 0) {
+        if (!Number.isInteger(p.termDays) || p.termDays <= 0) {
           return next(new ApiError(400, `Invalid termDays: ${p.termDays}`));
         }
 
@@ -256,4 +262,26 @@ export const adminRunStakingProfit = catchAsync(async (req, res, next) => {
   });
 
   res.status(200).json({ success: true, result });
+});
+
+export const adminGetStakingSettings = catchAsync(async (_req, res) => {
+  res.json({ success: true, settings: publicStakingSettings(await getStakingSettings()) });
+});
+
+export const adminUpdateStakingSettings = catchAsync(async (req, res) => {
+  const { stakingEnabled, profitEnabled, cancellationFeePercent, profitDays } = req.body;
+  if (typeof stakingEnabled !== "boolean" || typeof profitEnabled !== "boolean" ||
+      typeof cancellationFeePercent !== "number" || !Number.isFinite(cancellationFeePercent) ||
+      cancellationFeePercent < 0 || cancellationFeePercent > 100 ||
+      !Array.isArray(profitDays) || profitDays.some((day: unknown) =>
+        typeof day !== "number" || !Number.isInteger(day) || day < 0 || day > 6)) {
+    throw new ApiError(400, "Provide valid switches, a fee from 0 to 100, and weekdays from 0 to 6");
+  }
+  await getStakingSettings();
+  const days = [...new Set<number>(profitDays)].sort();
+  const settings = await StakingSetting.findOneAndUpdate({ key: "global" }, {
+    $set: { stakingEnabled, profitEnabled, cancellationFeePercent, profitDays: days },
+    $push: { policyHistory: { effectiveDay: stakingDayKey(new Date()), profitEnabled, profitDays: days } },
+  }, { new: true, runValidators: true });
+  res.json({ success: true, settings: publicStakingSettings(settings!) });
 });

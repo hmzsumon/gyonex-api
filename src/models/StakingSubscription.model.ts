@@ -17,6 +17,8 @@ export interface IStakingSubscription extends Document<Types.ObjectId> {
   totalProfitPercent: number; // snapshot
   dailyProfitPercent: number; // snapshot
 
+  userSharePercent?: number;
+  profitTimezone?: "Asia/Dhaka";
   paidDays: number;
   totalProfitQty: number;
   lastPaidDayKey?: string;
@@ -68,6 +70,8 @@ const stakingSubscriptionSchema = new Schema<IStakingSubscription>(
     totalProfitPercent: { type: Number, required: true },
     dailyProfitPercent: { type: Number, required: true },
 
+    userSharePercent: { type: Number, min: 0, max: 1 },
+    profitTimezone: { type: String, enum: ["Asia/Dhaka"] },
     paidDays: { type: Number, default: 0 },
     totalProfitQty: { type: Number, default: 0 },
     lastPaidDayKey: { type: String },

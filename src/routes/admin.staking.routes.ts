@@ -1,4 +1,6 @@
 import {
+  adminGetStakingSettings,
+  adminUpdateStakingSettings,
   adminBulkUpsertStakingPlans,
   adminGetAllStakingPlans,
   adminRunStakingProfit,
@@ -8,6 +10,9 @@ import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
 import { Router } from "express";
 
 const router = Router();
+
+router.get("/admin/staking/settings", isAuthenticatedUser, authorizeRoles("admin"), adminGetStakingSettings);
+router.put("/admin/staking/settings", isAuthenticatedUser, authorizeRoles("admin"), adminUpdateStakingSettings);
 
 router.get(
   "/admin/staking/plans",
@@ -26,11 +31,11 @@ router.post(
 // ✅ bulk endpoint
 router.post(
   "/admin/staking/plans/bulk",
-
+  isAuthenticatedUser, authorizeRoles("admin"),
   adminBulkUpsertStakingPlans
 );
 
 // ✅ POST /admin/staking/run-profit
-router.post("/staking/run-profit", adminRunStakingProfit);
+router.post("/staking/run-profit", isAuthenticatedUser, authorizeRoles("admin"), adminRunStakingProfit);
 
 export default router;
