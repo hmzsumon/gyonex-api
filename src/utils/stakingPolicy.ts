@@ -20,3 +20,11 @@ export function cancellationAmounts(principal: number, percent: number) {
   const penaltyQty = +((principal * percent) / 100).toFixed(8);
   return { penaltyQty, returnQty: +Math.max(0, principal - penaltyQty).toFixed(8) };
 }
+
+export function stakingCancellationDeadline(start: Date) {
+ const d = new Date(start.getTime() + 21600000), day = d.getUTCDate();
+ d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth()+1);
+ d.setUTCDate(Math.min(day,new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate()));
+ return new Date(d.getTime()-21600000);
+}
+export const stakingProfitCap = (principal: number) => +(principal * (principal <= 10000 ? 2.5 : 3.5)).toFixed(8);

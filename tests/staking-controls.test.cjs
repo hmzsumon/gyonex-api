@@ -64,19 +64,19 @@ test('cancellation fees use principal, including zero and 100 percent boundaries
   assert.deepEqual(cancellationAmounts(0.00001234, 5), { penaltyQty: 0.00000062, returnQty: 0.00001172 });
 });
 
-test('job uses selected calendar dates and subscription user-share snapshot', async () => {
+test('job uses selected calendar dates and 60 percent user share', async () => {
   const sub = subscription();
   mockJob(settings({ policyHistory: [{ effectiveDay: '2026-09-20', profitEnabled: true, profitDays: [0, 2, 4] }] }), sub, ['2026-09-20']);
   const out = await runStakingProfitJob({ runAt: new Date('2026-09-24T01:00:00+06:00'), dryRun: true });
   assert.equal(out.profitLogsCreated, 2); // Tuesday and Thursday; Sunday already paid.
-  assert.equal(out.userProfitCreditedQty, 1); // 100 * 2% * 25% for each eligible day.
+  assert.equal(out.userProfitCreditedQty, 2.4); // 100 * 2% * 25% for each eligible day.
 });
 
-test('paused profits still allow maturity principal returns', async () => {
+test('paused profits do not return principal before the profit cap', async () => {
   mockJob(settings({ profitEnabled: false }), subscription());
   const out = await runStakingProfitJob({ runAt: new Date('2026-09-28T01:00:00+06:00'), dryRun: true });
   assert.equal(out.profitLogsCreated, 0);
-  assert.equal(out.principalsReturned, 1);
+  assert.equal(out.principalsReturned, 0);
 });
 
 test('legacy subscriptions retain existing ledger day keys without duplicate payouts', async () => {
@@ -86,7 +86,7 @@ test('legacy subscriptions retain existing ledger day keys without duplicate pay
   const date = sub.startedAt;
   const legacyKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   mockJob(settings(), sub, [legacyKey]);
-  const out = await runStakingProfitJob({ runAt: new Date('2026-09-24T01:00:00+06:00'), dryRun: true });
+  const out = await runStakingProfitJob({ runAt: new Date(sub.startedAt), dryRun: true });
   assert.equal(out.profitLogsCreated, 0);
 });
 
@@ -126,7 +126,7 @@ test('new package durations and custom user shares are saved', async () => {
   assert.equal(saved.isActive, false);
 });
 
-test('loan repayment ignores previously configured extra fees and debits only the payment', async () => {
+test('loan repayment adds the admin fee and reduces only payment principal', async () => {
   const { Loan } = require('../src/models/Loan.model');
   const { User } = require('../src/models/user.model');
   const Wallet = require('../src/models/UserWallet.model').default;
@@ -137,19 +137,25 @@ test('loan repayment ignores previously configured extra fees and debits only th
   const { repayLoan, getLoanRepaymentSettings, updateAdminLoanRepaymentSettings } = require('../src/controllers/loan.controller');
   const userId = new Types.ObjectId();
   const loan = { _id: new Types.ObjectId(), totalRepayable: 100, totalPaid: 0, loanType: 'personal', repaymentHistory: [], save: async () => {} };
-  const user = { _id: userId, m_balance: 10, role: 'user', save: async () => {} };
+  const user = { _id: userId, m_balance: 10.8, role: 'user', save: async () => {} };
   stub(Loan, 'findOne', async () => loan);
   stub(User, 'findById', async () => user);
   stub(Wallet, 'findOneAndUpdate', async () => ({}));
-  stub(LoanSetting, 'getSingleton', async () => ({ repaymentFeePercent: 10 }));
+  stub(LoanSetting, 'getSingleton', async () => ({ repaymentFeePercent: 8 }));
   stub(Notification, 'create', async () => ({}));
   stub(AdminNotification, 'create', async () => ({}));
-  stub(TransactionManager.prototype, 'createTransaction', async data => { assert.equal(data.amount, 10); return { _id: new Types.ObjectId() }; });
+  stub(TransactionManager.prototype, 'createTransaction', async data => { assert.equal(data.amount, 10.8); return { _id: new Types.ObjectId() }; });
   const out = await invoke(repayLoan, { user: { _id: userId }, params: { loanId: String(loan._id) }, body: { amount: 10 } });
-  assert.equal(out.payment.totalCharged, 10);
-  assert.equal(out.payment.fee, 0);
+  assert.equal(out.payment.totalCharged, 10.8);
+  assert.equal(out.payment.fee, 0.8);
   assert.equal(user.m_balance, 0);
   assert.equal(loan.totalPaid, 10);
-  assert.equal((await invoke(getLoanRepaymentSettings)).settings.repaymentFeePercent, 0);
-  await assert.rejects(invoke(updateAdminLoanRepaymentSettings, { body: { repaymentFeePercent: 10 } }), /fees are disabled/);
+  assert.equal((await invoke(getLoanRepaymentSettings)).settings.repaymentFeePercent, 8);
+  await assert.rejects(invoke(updateAdminLoanRepaymentSettings, { body: { repaymentFeePercent: 101 } }), /between 0 and 100/);
+});
+
+test('catch-up caps the final payout and stops subsequent days', async () => {
+ const sub=subscription();sub.totalProfitQty=249.5;mockJob(settings(),sub);
+ const out=await runStakingProfitJob({runAt:new Date('2026-09-24T01:00:00+06:00'),dryRun:true});
+ assert.equal(out.profitLogsCreated,1);assert.equal(out.userProfitCreditedQty,0.5);assert.equal(out.principalsReturned,0);
 });

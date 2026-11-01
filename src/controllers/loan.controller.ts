@@ -584,7 +584,7 @@ export const getLoanRepaymentSettings: typeHandler = catchAsync(
     const settings = await LoanSetting.getSingleton();
     res.status(200).json({
       success: true,
-      settings: { repaymentFeePercent: 0 },
+      settings: { repaymentFeePercent: settings.repaymentFeePercent },
     });
   },
 );
@@ -592,7 +592,7 @@ export const getLoanRepaymentSettings: typeHandler = catchAsync(
 export const getAdminLoanRepaymentSettings: typeHandler = catchAsync(
   async (_req, res) => {
     const settings = await LoanSetting.getSingleton();
-    res.status(200).json({ success: true, settings: { repaymentFeePercent: 0 } });
+    res.status(200).json({ success: true, settings: { repaymentFeePercent: settings.repaymentFeePercent } });
   },
 );
 
@@ -602,9 +602,9 @@ export const updateAdminLoanRepaymentSettings: typeHandler = catchAsync(
 
     if (
       repaymentFeePercent == null ||
-      Number(repaymentFeePercent) !== 0
+      !Number.isFinite(Number(repaymentFeePercent)) || Number(repaymentFeePercent) < 0 || Number(repaymentFeePercent) > 100
     ) {
-      throw new ApiError(400, "Additional loan repayment fees are disabled");
+      throw new ApiError(400, "Repayment fee must be between 0 and 100");
     }
 
     const settings = await LoanSetting.getSingleton();
@@ -660,7 +660,8 @@ export const repayLoan: typeHandler = catchAsync(async (req, res) => {
 
   /* ────────── admin-configurable repayment fee ────────── */
   // No additional repayment charge, including for previously saved fee settings.
-  const feePercent = 0;
+  const settings = await LoanSetting.getSingleton();
+  const feePercent = settings.repaymentFeePercent;
   const repaymentFee = Number(((payAmount * feePercent) / 100).toFixed(2));
   const totalCharge = Number((payAmount + repaymentFee).toFixed(2));
 

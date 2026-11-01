@@ -1,5 +1,5 @@
 import { getStakingSettings, publicStakingSettings } from "@/models/StakingSetting.model";
-import { cancellationAmounts } from "@/utils/stakingPolicy";
+import { cancellationAmounts, stakingCancellationDeadline } from "@/utils/stakingPolicy";
 // src/controllers/staking.controller.ts
 import SpotWallet from "@/models/SpotWallet.model";
 import StakingPlan from "@/models/StakingPlan.model";
@@ -187,7 +187,7 @@ export const subscribeStaking = catchAsync(async (req, res, next) => {
 
       dailyProfitPercent,
       totalProfitPercent,
-      userSharePercent: plan.userSharePercent,
+      userSharePercent: 0.6,
       profitTimezone: "Asia/Dhaka",
 
       paidDays: 0,
@@ -303,6 +303,9 @@ export const cancelMySubscription = catchAsync(async (req, res, next) => {
 
   const settings = await getStakingSettings();
 
+  const candidate = await StakingSubscription.findOne({ _id: id, userId, status: "active" });
+  if (!candidate || Date.now() >= stakingCancellationDeadline(new Date(candidate.startedAt)).getTime())
+    return next(new ApiError(400, "Cancellation is available only during the first calendar month"));
   // ✅ lock to prevent double cancel
   const sub = await StakingSubscription.findOneAndUpdate(
     { _id: id, userId, status: "active", principalReturnLocked: { $ne: true }, cancelLocked: { $ne: true } },
@@ -316,7 +319,7 @@ export const cancelMySubscription = catchAsync(async (req, res, next) => {
   const baseDaily = 0;
   const paidDays = Number(sub.paidDays || 0);
   const fixedDaily = Number(sub.dailyProfitPercent || 0);
-  const penaltyPercent = settings.cancellationFeePercent;
+  const penaltyPercent = 10;
   const principalQty = Number(sub.principalQty || 0);
   const { penaltyQty, returnQty } = cancellationAmounts(principalQty, penaltyPercent);
 

@@ -280,7 +280,7 @@ export const adminUpdateStakingSettings = catchAsync(async (req, res) => {
   await getStakingSettings();
   const days = [...new Set<number>(profitDays)].sort();
   const settings = await StakingSetting.findOneAndUpdate({ key: "global" }, {
-    $set: { stakingEnabled, profitEnabled, cancellationFeePercent, profitDays: days },
+    $set: { stakingEnabled, profitEnabled, cancellationFeePercent: 10, profitDays: days },
     $push: { policyHistory: { effectiveDay: stakingDayKey(new Date()), profitEnabled, profitDays: days } },
   }, { new: true, runValidators: true });
   res.json({ success: true, settings: publicStakingSettings(settings!) });
