@@ -15,8 +15,8 @@ const LuckyPackageSchema = new Schema(
     name: { type: String, trim: true, required: true },
     cardCount: { type: Number, required: true, min: 1 },
     bonusCards: { type: Number, default: 0 },
-    // regularPrice = আসল দাম (শপে কাটা অবস্থায় দেখাবে)।
-    // price = অফার প্রাইস — ইউজার এটা দিয়েই কার্ড কেনে, এটাই m_balance থেকে কাটা হয়।
+    // Cached values for compatibility. Shop and checkout always derive totals
+    // from the current card type price; bonusCards are free.
     regularPrice: { type: Number, default: 0, min: 0 },
     price: { type: Number, required: true, min: 0 },
     isActive: { type: Boolean, default: true },
