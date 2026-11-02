@@ -258,6 +258,8 @@ async function createLoanAdminNotification({
    GET /loans/packages
 ───────────────────────────────────────────────────────────────────────── */
 export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
+  const settings = await LoanSetting.getSingleton();
+  const rate = Number(settings.monthlyInterestPercent) / 100;
   res.json({
     success: true,
     data: {
@@ -268,7 +270,7 @@ export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
       types: {
         trading: {
           label: "Trading Loan",
-          rate: 0.06,
+          rate,
           defaultDays: 50,
           maxDays: 50,
           minAmount: 50,
@@ -277,7 +279,7 @@ export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
         },
         business: {
           label: "Business Loan",
-          rate: 0.06,
+          rate,
           defaultDays: 120,
           maxDays: 120,
           minAmount: 500,
@@ -286,7 +288,7 @@ export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
         },
         house: {
           label: "Home Loan",
-          rate: 0.06,
+          rate,
           defaultDays: 90,
           maxDays: 90,
           minAmount: 1000,
@@ -295,7 +297,7 @@ export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
         },
         land: {
           label: "Land Loan",
-          rate: 0.06,
+          rate,
           defaultDays: 90,
           maxDays: 180,
           minAmount: 1000,
@@ -304,7 +306,7 @@ export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
         },
         study: {
           label: "Student Loan",
-          rate: 0.06,
+          rate,
           defaultDays: 90,
           maxDays: 90,
           minAmount: 200,
@@ -313,7 +315,7 @@ export const getLoanPackages: typeHandler = catchAsync(async (_req, res) => {
         },
         emergency: {
           label: "Emergency",
-          rate: 0.06,
+          rate,
           defaultDays: 14,
           maxDays: 30,
           minAmount: 50,
@@ -378,6 +380,8 @@ export const getMyLoans: typeHandler = catchAsync(async (req, res) => {
         totalRepaid,
         activeLoans,
         pendingLoans,
+        canApply: !all.some(l => ["pending", "approved", "active", "defaulted"].includes(l.status)),
+        hasOutstandingLoan: all.some(l => ["approved", "active", "defaulted"].includes(l.status)),
       },
     },
   });
@@ -466,6 +470,7 @@ export const applyForLoan: typeHandler = catchAsync(async (req, res) => {
   const isKycVerified =
     Boolean((user as any).kyc_verified) ||
     (user as any).kycStatus === "verified" ||
+    (user as any).kycStatus === "approved" ||
     Boolean((user as any).isKycVerified);
 
   if (!isKycVerified) {
@@ -478,7 +483,7 @@ export const applyForLoan: typeHandler = catchAsync(async (req, res) => {
   /* ────────── Duplicate pending/active loan block ────────── */
   const existingLoan = await Loan.findOne({
     userId: userObjectId,
-    status: { $in: ["pending", "active"] },
+    status: { $in: ["pending", "approved", "active", "defaulted"] },
   });
 
   if (existingLoan) {
@@ -504,7 +509,10 @@ export const applyForLoan: typeHandler = catchAsync(async (req, res) => {
     throw new ApiError(400, "Repayment period must be at least 7 days");
   }
 
-  const interestRate = 0.06;
+  const settings = await LoanSetting.getSingleton();
+  if (req.body.monthlyInterestPercent != null && Number(req.body.monthlyInterestPercent) !== Number(settings.monthlyInterestPercent))
+    throw new ApiError(409, "The loan interest rate has changed. Review the updated rate and try again.");
+  const interestRate = Number(settings.monthlyInterestPercent) / 100;
   const totalInterest = amount * interestRate * (days / 30);
   const totalRepayable = amount + totalInterest;
 
@@ -521,6 +529,9 @@ export const applyForLoan: typeHandler = catchAsync(async (req, res) => {
     applicantEmail: user.email || "",
     nidNumber: "KYC_VERIFIED",
     status: "pending",
+  }).catch((error: any) => {
+    if (error?.code === 11000) throw new ApiError(409, "You already have a pending or outstanding loan. Please repay it first.");
+    throw error;
   });
 
   /* ────────── User notification + socket ────────── */
@@ -584,7 +595,7 @@ export const getLoanRepaymentSettings: typeHandler = catchAsync(
     const settings = await LoanSetting.getSingleton();
     res.status(200).json({
       success: true,
-      settings: { repaymentFeePercent: settings.repaymentFeePercent },
+      settings: { repaymentFeePercent: settings.repaymentFeePercent, monthlyInterestPercent: settings.monthlyInterestPercent },
     });
   },
 );
@@ -592,29 +603,28 @@ export const getLoanRepaymentSettings: typeHandler = catchAsync(
 export const getAdminLoanRepaymentSettings: typeHandler = catchAsync(
   async (_req, res) => {
     const settings = await LoanSetting.getSingleton();
-    res.status(200).json({ success: true, settings: { repaymentFeePercent: settings.repaymentFeePercent } });
+    res.status(200).json({ success: true, settings: { repaymentFeePercent: settings.repaymentFeePercent, monthlyInterestPercent: settings.monthlyInterestPercent } });
   },
 );
 
 export const updateAdminLoanRepaymentSettings: typeHandler = catchAsync(
   async (req, res) => {
-    const { repaymentFeePercent } = req.body;
-
-    if (
-      repaymentFeePercent == null ||
-      !Number.isFinite(Number(repaymentFeePercent)) || Number(repaymentFeePercent) < 0 || Number(repaymentFeePercent) > 100
-    ) {
-      throw new ApiError(400, "Repayment fee must be between 0 and 100");
+    const { repaymentFeePercent, monthlyInterestPercent } = req.body;
+    if (repaymentFeePercent == null && monthlyInterestPercent == null)
+      throw new ApiError(400, "Provide a repayment fee or monthly interest rate");
+    for (const value of [repaymentFeePercent, monthlyInterestPercent]) {
+      if (value != null && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100))
+        throw new ApiError(400, "Loan rates must be between 0 and 100");
     }
-
     const settings = await LoanSetting.getSingleton();
-    settings.repaymentFeePercent = Number(repaymentFeePercent);
+    if (repaymentFeePercent != null) settings.repaymentFeePercent = Number(repaymentFeePercent);
+    if (monthlyInterestPercent != null) settings.monthlyInterestPercent = Number(monthlyInterestPercent);
     settings.updatedBy = req.user?._id as any;
     await settings.save();
 
     res.status(200).json({
       success: true,
-      message: "Loan repayment fee updated successfully",
+      message: "Loan interest and repayment settings updated successfully",
       settings,
     });
   },
@@ -634,7 +644,7 @@ export const repayLoan: typeHandler = catchAsync(async (req, res) => {
   const loan = await Loan.findOne({
     _id: req.params.loanId,
     userId,
-    status: "active",
+    status: { $in: ["active", "defaulted"] },
   });
 
   if (!loan) throw new ApiError(404, "Active loan not found");
@@ -878,7 +888,8 @@ export const approveLoan: typeHandler = catchAsync(async (req, res) => {
     throw new ApiError(400, "Please enter a valid approved amount");
   }
 
-  const rate = 0.06;
+  const rate = Number(loan.interestRate);
+  if (!Number.isFinite(rate) || rate < 0 || rate > 1) throw new ApiError(400, "Loan has an invalid interest rate");
   const totalRepayable =
     approvedAmount * (1 + rate * (loan.repaymentPeriodDays / 30));
 

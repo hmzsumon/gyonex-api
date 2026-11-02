@@ -11,6 +11,7 @@ import { Model, model, Schema } from "mongoose";
 export interface ILoanSetting {
   key: string;
   repaymentFeePercent: number;
+  monthlyInterestPercent: number;
   updatedBy?: Schema.Types.ObjectId | null;
 }
 
@@ -18,6 +19,7 @@ const loanSettingSchema = new Schema<ILoanSetting>(
   {
     key: { type: String, default: "global", unique: true },
     repaymentFeePercent: { type: Number, default: 8, min: 0, max: 100 },
+    monthlyInterestPercent: { type: Number, default: 6, min: 0, max: 100 },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true },

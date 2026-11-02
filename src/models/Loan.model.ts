@@ -121,6 +121,8 @@ const LoanSchema = new Schema<ILoan>(
 );
 
 LoanSchema.index({ userId: 1, status: 1 });
+// Prevent simultaneous applications from creating multiple outstanding loans.
+LoanSchema.index({ userId: 1 }, { unique: true, name: "one_outstanding_loan_per_user", partialFilterExpression: { status: { $in: ["pending", "approved", "active", "defaulted"] } } });
 LoanSchema.index({ status: 1, createdAt: -1 });
 
 // ─── Virtual: days remaining & countdown ─────────────────────────────────────
