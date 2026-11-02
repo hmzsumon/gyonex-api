@@ -1,0 +1,11 @@
+🔗 MongoDB URI: mongodb://0.0.0.0:27017/gyonex-local
+✅ MongoDB connected with server: 0.0.0.0
+[redis] connected
+[redis] ready
+✅ Redis OK (web): PONG
+[quote-broadcaster] starting for symbols: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, ADAUSDT, XRPUSDT, TWTUSDT, AVAXUSDT, DOTUSDT, LINKUSDT, LTCUSDT, TRXUSDT, ETCUSDT, ATOMUSDT, FTMUSDT
+[redis] connected
+[redis] connected
+[redis] ready
+[redis] connected
+[redis] ready
