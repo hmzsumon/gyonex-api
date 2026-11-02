@@ -5,6 +5,9 @@ import { ACCOUNT_TYPES, TAccountType } from "@/config/accountTypes";
 import { emitPositionOpened } from "@/events/positions";
 import AgentStatus from "@/models/AgentStatus.model";
 import Account from "@/models/AiAccount.model";
+import { smartTradeCap } from "@/utils/smartTradePolicy";
+import { getSmartTradeSettings } from "@/models/SmartTradeSetting.model";
+import { syncSmartAccount, smartAccountView, refreshSmartEligibility } from "@/services/smartTradeLifecycle.service";
 import AiPlan from "@/models/AiPlan.model";
 import AiPosition from "@/models/AiPosition.model";
 import { Notification } from "@/models/Notification.model";
@@ -109,6 +112,7 @@ export const createAiAccount: typeHandler = catchAsync(
         equity: debit,
         role: user.role,
         planPrice: debit,
+        earnedProfit: 0,
         status: "active",
         mode: "ai",
       });
@@ -213,11 +217,12 @@ export const createAiAccount: typeHandler = catchAsync(
 /* ── My AI Account ───────────────────────────────── */
 export const myAiAccounts: typeHandler = catchAsync(async (req, res) => {
   const userId = req.user!._id;
-  const items = await Account.find({ userId }).sort({
-    isDefault: -1,
-    createdAt: 1,
-  });
-  res.json({ success: true, items });
+  const items = await Account.find({ userId }).sort({ isDefault: -1, createdAt: 1 }).lean();
+  const settings = await getSmartTradeSettings();
+  const views = [];
+  for (const item of items) views.push(smartAccountView(await syncSmartAccount(item), settings.cancellationFeePercent));
+  await refreshSmartEligibility(userId);
+  res.json({ success: true, items: views });
 });
 
 /* ── Get all active AI Account ───────────────────────────────── */
@@ -1020,8 +1025,10 @@ export const addFundToAiAccount: typeHandler = catchAsync(async (req, res) => {
     throw new ApiError(400, "Invalid account or amount");
   }
 
-  const acc = await Account.findById(accountId);
+  const acc = await Account.findOne({ _id: accountId, userId });
   if (!acc) throw new ApiError(404, "Account not found");
+  await syncSmartAccount(acc);
+  if (acc.status === "expired" || acc.expiredAt || acc.cancelledAt || Number(acc.earnedProfit || 0) >= smartTradeCap(Number(acc.planPrice))) throw new ApiError(400, "Create a new Smart Trade account to renew");
 
   const walletBalance = Number(user.m_balance || 0);
   if (!Number.isFinite(walletBalance) || walletBalance <= 0) {

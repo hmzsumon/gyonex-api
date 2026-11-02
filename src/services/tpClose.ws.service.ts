@@ -88,6 +88,7 @@ async function tryCloseIfTpHitWithQuote(
         pnl,
         closeQuoteTs: ts ?? Date.now(),
         closeReason: "takeProfit_usd_ws",
+        distributionPending: true,
       },
     }
   ).exec();
@@ -161,6 +162,11 @@ let refreshTimer: NodeJS.Timeout | null = null;
  * - Subscribes/unsubscribes to per-symbol quote streams as needed
  */
 async function refreshCache(): Promise<void> {
+  const pending = await AiPosition.find({ status: "closed", distributionPending: true, distributedAt: { $exists: false } }).select("_id").limit(20).lean();
+  for (const position of pending) {
+    try { await distributeOnAutoCloseSimple(String(position._id)); }
+    catch (error: any) { console.error("[TP] pending distribution failed", String(position._id), error?.message); }
+  }
   // 1) Fetch open TP positions
   const items: IAiPosition[] = await AiPosition.find({
     status: "open",

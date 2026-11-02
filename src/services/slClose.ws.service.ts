@@ -65,7 +65,7 @@ async function tryCloseIfSlHitWithQuote(
   if (applied) {
     try {
       const acc = await AiAccount.findById(pos.accountId);
-      if (acc && acc.role !== "admin") {
+      if (acc && acc.role !== "admin" && acc.status === "active" && !acc.expiredAt && !acc.cancelledAt) {
         const curBal = Number(acc.balance ?? 0);
         const curEq = Number(acc.equity ?? curBal);
 

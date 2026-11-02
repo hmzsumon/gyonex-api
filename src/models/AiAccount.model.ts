@@ -8,10 +8,17 @@ export interface IAccount extends Document {
   balance: number;
   equity: number; // 👈 NEW
   isDefault: boolean;
-  status: "active" | "closed" | "inactive";
+  status: "active" | "closed" | "inactive" | "expired";
   mode: "ai";
   meta?: Record<string, any>;
   profit: number;
+  earnedProfit?: number;
+  expiredAt?: Date;
+  cancelledAt?: Date;
+  cancellationFeePercent?: number;
+  cancellationFee?: number;
+  cancellationRefund?: number;
+  createdAt: Date;
   plan: string;
   amount: number;
   role: string;
@@ -33,12 +40,18 @@ const aiAccountSchema = new Schema<IAccount>(
     plan: { type: String, required: true },
     currency: { type: String, enum: ["USD", "BDT"], default: "USD" },
     profit: { type: Number, default: 0 },
+    earnedProfit: { type: Number, min: 0 },
+    expiredAt: Date,
+    cancelledAt: Date,
+    cancellationFeePercent: Number,
+    cancellationFee: Number,
+    cancellationRefund: Number,
     balance: { type: Number, default: 0 },
     equity: { type: Number, default: 0 },
     isDefault: { type: Boolean, default: false },
     status: {
       type: String,
-      enum: ["active", "closed", "inactive"],
+      enum: ["active", "closed", "inactive", "expired"],
       default: "active",
     },
     mode: {

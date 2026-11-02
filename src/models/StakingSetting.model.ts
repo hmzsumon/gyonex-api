@@ -14,7 +14,7 @@ const schema = new Schema<StakingSettings>({
   key: { type: String, default: "global", unique: true },
   stakingEnabled: { type: Boolean, default: true },
   profitEnabled: { type: Boolean, default: true },
-  cancellationFeePercent: { type: Number, default: 10, min: 0, max: 100 },
+  cancellationFeePercent: { type: Number, default: 0, min: 0, max: 100 },
   profitDays: { type: [Number], default: [0, 1, 2, 3, 4, 5, 6] },
   policyHistory: { type: [{
     _id: false,
@@ -35,7 +35,7 @@ export const getStakingSettings = () => StakingSetting.findOneAndUpdate(
 export const publicStakingSettings = (settings: StakingSettings) => ({
   stakingEnabled: settings.stakingEnabled,
   profitEnabled: settings.profitEnabled,
-  cancellationFeePercent: 10,
+  cancellationFeePercent: settings.cancellationFeePercent,
   profitDays: settings.profitDays,
   timezone: "Asia/Dhaka",
 });

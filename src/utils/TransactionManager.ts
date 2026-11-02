@@ -5,7 +5,7 @@ import {
   TransactionType,
 } from "@/models/Transaction.model";
 import { IUser, User as UserModel } from "@/models/user.model";
-import { Types } from "mongoose";
+import { Types, ClientSession } from "mongoose";
 
 interface CreateTransactionInput {
   userId: Types.ObjectId | string;
@@ -14,6 +14,7 @@ interface CreateTransactionInput {
   amount: number;
   purpose: TransactionPurpose;
   description?: string;
+  session?: ClientSession;
 }
 
 class TransactionManager {
@@ -30,9 +31,10 @@ class TransactionManager {
     amount,
     purpose,
     description = "Transaction",
+    session,
   }: CreateTransactionInput): Promise<ITransaction> {
     try {
-      const user: IUser | null = await UserModel.findById(userId);
+      const user: IUser | null = await UserModel.findById(userId).session(session ?? null);
       if (!user) throw new Error("User not found");
 
       const current_m_balance = user.m_balance || 0;
@@ -58,7 +60,7 @@ class TransactionManager {
         isCashOut: transactionType === "cashOut",
       });
 
-      await transaction.save();
+      await transaction.save({ session });
       return transaction;
     } catch (error: any) {
       console.error("❌ Error creating transaction:", error.message);

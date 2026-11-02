@@ -64,19 +64,19 @@ test('cancellation fees use principal, including zero and 100 percent boundaries
   assert.deepEqual(cancellationAmounts(0.00001234, 5), { penaltyQty: 0.00000062, returnQty: 0.00001172 });
 });
 
-test('job uses selected calendar dates and 60 percent user share', async () => {
+test('job uses selected calendar dates and subscription user-share snapshot', async () => {
   const sub = subscription();
   mockJob(settings({ policyHistory: [{ effectiveDay: '2026-09-20', profitEnabled: true, profitDays: [0, 2, 4] }] }), sub, ['2026-09-20']);
   const out = await runStakingProfitJob({ runAt: new Date('2026-09-24T01:00:00+06:00'), dryRun: true });
   assert.equal(out.profitLogsCreated, 2); // Tuesday and Thursday; Sunday already paid.
-  assert.equal(out.userProfitCreditedQty, 2.4); // 100 * 2% * 25% for each eligible day.
+  assert.equal(out.userProfitCreditedQty, 1); // 100 * 2% * 25% for each eligible day.
 });
 
-test('paused profits do not return principal before the profit cap', async () => {
+test('paused profits still allow maturity principal returns', async () => {
   mockJob(settings({ profitEnabled: false }), subscription());
   const out = await runStakingProfitJob({ runAt: new Date('2026-09-28T01:00:00+06:00'), dryRun: true });
   assert.equal(out.profitLogsCreated, 0);
-  assert.equal(out.principalsReturned, 0);
+  assert.equal(out.principalsReturned, 1);
 });
 
 test('legacy subscriptions retain existing ledger day keys without duplicate payouts', async () => {
@@ -86,7 +86,7 @@ test('legacy subscriptions retain existing ledger day keys without duplicate pay
   const date = sub.startedAt;
   const legacyKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   mockJob(settings(), sub, [legacyKey]);
-  const out = await runStakingProfitJob({ runAt: new Date(sub.startedAt), dryRun: true });
+  const out = await runStakingProfitJob({ runAt: new Date('2026-09-24T01:00:00+06:00'), dryRun: true });
   assert.equal(out.profitLogsCreated, 0);
 });
 
@@ -152,10 +152,4 @@ test('loan repayment adds the admin fee and reduces only payment principal', asy
   assert.equal(loan.totalPaid, 10);
   assert.equal((await invoke(getLoanRepaymentSettings)).settings.repaymentFeePercent, 8);
   await assert.rejects(invoke(updateAdminLoanRepaymentSettings, { body: { repaymentFeePercent: 101 } }), /between 0 and 100/);
-});
-
-test('catch-up caps the final payout and stops subsequent days', async () => {
- const sub=subscription();sub.totalProfitQty=249.5;mockJob(settings(),sub);
- const out=await runStakingProfitJob({runAt:new Date('2026-09-24T01:00:00+06:00'),dryRun:true});
- assert.equal(out.profitLogsCreated,1);assert.equal(out.userProfitCreditedQty,0.5);assert.equal(out.principalsReturned,0);
 });

@@ -1,3 +1,4 @@
+import { hasEligibleSmartAccount } from "@/services/smartTradeLifecycle.service";
 import AgentStatus from "@/models/AgentStatus.model";
 import { User } from "@/models/user.model";
 import UserTeamSummary from "@/models/UserTeamSummary.model";
@@ -26,7 +27,7 @@ export const applySponsorBonus = async ({
     }
 
     /* ────────── Check if sponsor is active ai trade ────────── */
-    if (!sponsor.is_active_aiTrade) {
+    if (!sponsor.is_active_aiTrade || !await hasEligibleSmartAccount(sponsor._id)) {
       console.error(`Sponsor ${sponsor.customerId} is not active.`);
       return;
     }

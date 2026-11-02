@@ -1,9 +1,10 @@
+import { hasEligibleSmartAccount } from "@/services/smartTradeLifecycle.service";
 import Company, { ISystemStats } from "@/models/SystemStats.model";
 import { IUser, User } from "@/models/user.model";
 import Team, { IUserTeamSummary } from "@/models/UserTeamSummary.model";
 import Wallet from "@/models/UserWallet.model";
 import TransactionManager from "@/utils/TransactionManager";
-import { Types } from "mongoose";
+import mongoose, { Types, ClientSession } from "mongoose";
 
 const transactionManager = new TransactionManager();
 
@@ -11,10 +12,16 @@ const distributeGenerationBonus = async (
   userId: string | Types.ObjectId,
   amount: number
 ): Promise<void> => {
+  const session = await mongoose.startSession();
+  try { await session.withTransaction(async () => { await distributeInSession(userId, amount, session); }); }
+  finally { await session.endSession(); }
+};
+
+async function distributeInSession(userId: string | Types.ObjectId, amount: number, session: ClientSession): Promise<void> {
   let total_cost = 0;
 
   try {
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).session(session);
 
     if (!user) {
       console.error("❌ User not found:", userId);
@@ -23,7 +30,7 @@ const distributeGenerationBonus = async (
 
     const parents: IUser[] = await User.find({
       _id: { $in: user.parents },
-    }).select("_id name customerId  m_balance is_active");
+    }).select("_id name customerId  m_balance is_active").session(session);
     parents.reverse();
 
     const bonusRates: number[] = [0.12, 0.08, 0.04]; // level 1 to 3
@@ -33,15 +40,15 @@ const distributeGenerationBonus = async (
       if (!parent) continue;
 
       //check if parent is active
-      if (!parent.is_active) {
+      if (!parent.is_active || !await hasEligibleSmartAccount(parent._id, session)) {
         console.log(`❌ Parent ${parent.name} is not active, skipping...`);
         continue;
       }
 
-      const parentWallet = await Wallet.findOne({ userId: parent._id });
+      const parentWallet = await Wallet.findOne({ userId: parent._id }).session(session);
       const parentTeam: IUserTeamSummary | null = await Team.findOne({
         userId: parent._id,
-      });
+      }).session(session);
 
       if (!parentWallet) continue;
 
@@ -70,11 +77,11 @@ const distributeGenerationBonus = async (
         parentTeam.todayTeamCommission += bonusAmount;
         parentTeam.thisMonthCommission += bonusAmount;
 
-        await parentTeam.save();
+        await parentTeam.save({ session });
       }
 
-      await parentWallet.save();
-      await parent.save();
+      await parentWallet.save({ session });
+      await parent.save({ session });
 
       total_cost += bonusAmount;
 
@@ -91,13 +98,14 @@ const distributeGenerationBonus = async (
         transactionType: "cashIn",
         purpose: "Team Commission",
         description: `Team commission for (${user.customerId})`,
+        session,
       });
     }
 
-    const company = (await Company.findOne()) as ISystemStats | null;
+    const company = (await Company.findOne().session(session)) as ISystemStats | null;
     if (company) {
       company.costs.total += total_cost;
-      await company.save();
+      await company.save({ session });
     }
 
     console.log("✅ Generation rebates distributed");

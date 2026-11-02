@@ -6,6 +6,8 @@ import SystemStats from "@/models/SystemStats.model";
 import { User } from "@/models/user.model";
 import TransactionManager from "@/utils/TransactionManager";
 import mongoose from "mongoose";
+import { syncSmartAccount, hasEligibleSmartAccount, refreshSmartEligibility } from "@/services/smartTradeLifecycle.service";
+import { smartTradePayout, smartTradeCap } from "@/utils/smartTradePolicy";
 
 /* ✅ NEW */
 import UserTeamSummary from "@/models/UserTeamSummary.model";
@@ -33,8 +35,16 @@ const msgParent = (childCustId: string, label: string, amt: number) =>
 
 /* ── main: distribute & replicate using EACH account's user & parents ───── */
 export async function distributeOnAutoCloseSimple(posId: string) {
+  const session = await mongoose.startSession();
+  try {
+    let result: any;
+    await session.withTransaction(async () => { result = await distributeInTransaction(posId, session); });
+    return result;
+  } finally { await session.endSession(); }
+}
+async function distributeInTransaction(posId: string, session: mongoose.ClientSession) {
   /* ── load source closed position ───────────────────────── */
-  const pos = await AiPosition.findById(posId).lean();
+  const pos = await AiPosition.findById(posId).session(session).lean();
   if (!pos) throw new Error("Position not found");
   if (pos.status !== "closed") throw new Error("Position is not closed yet");
   if (!pos.plan) throw new Error("Missing position.plan");
@@ -42,7 +52,8 @@ export async function distributeOnAutoCloseSimple(posId: string) {
   /* ── idempotency guard ─────────────────────────────────── */
   const guard = await AiPosition.updateOne(
     { _id: pos._id, distributedAt: { $exists: false } as any },
-    { $set: { distributedAt: new Date() } },
+    { $set: { distributedAt: new Date(), distributionPending: false } },
+    { session },
   ).exec();
   if (guard.modifiedCount === 0) return { ok: true, skipped: true };
 
@@ -53,14 +64,21 @@ export async function distributeOnAutoCloseSimple(posId: string) {
   const base = round2(baseRaw);
 
   /* ── load all active user accounts for this plan ───────── */
-  const accounts = await AiAccount.find({
+  const candidates = await AiAccount.find({
     plan: pos.plan,
     status: "active",
     role: "user",
+    is_active: { $ne: false },
   })
-    .select({ _id: 1, userId: 1, customerId: 1 })
+    .session(session)
     .lean();
 
+  const accounts = [];
+  for (const candidate of candidates) {
+    const account = await syncSmartAccount(candidate, session);
+    if (account.status === "active" && Number(account.planPrice) > 0) accounts.push(account);
+    else await refreshSmartEligibility(account.userId, session);
+  }
   if (accounts.length === 0) {
     return { ok: true, skipped: true, reason: "no_accounts" };
   }
@@ -87,11 +105,13 @@ export async function distributeOnAutoCloseSimple(posId: string) {
     takeProfit: pos.takeProfit,
     stopLoss: pos.stopLoss,
     plan: pos.plan,
-    planPrice: pos.planPrice,
+    planPrice: acc.planPrice,
+    sourcePositionId: pos._id,
+    userProfitCredited: smartTradePayout(Number(acc.planPrice), Number(acc.earnedProfit || 0), base).user,
   }));
 
   /* ── bulk insert cloned positions ──────────────────────── */
-  await AiPosition.insertMany(clones);
+  await AiPosition.insertMany(clones, { session });
 
   /* ── compute per-account amounts ───────────────────────── */
   const perUserAmt = round2(base * PCT_USER);
@@ -101,7 +121,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
   /* ── fetch users (parents + customerId) once ───────────── */
   const userIds = [...new Set(accounts.map((a) => String(a.userId)))];
   const users = await User.find({ _id: { $in: userIds } })
-    .select({ parents: 1, customerId: 1 })
+    .select({ parents: 1, customerId: 1 }).session(session)
     .lean();
 
   /* ── build quick maps ──────────────────────────────────── */
@@ -137,11 +157,21 @@ export async function distributeOnAutoCloseSimple(posId: string) {
 
   /* ── collect transactions to create (user + parents) ───── */
   const txManager = new TransactionManager();
-  const txPromises: Promise<any>[] = [];
+  const txPromises: (() => Promise<any>)[] = [];
 
   for (const acc of accounts) {
     const uid = String(acc.userId);
     const childCustId = acc.customerId || custIdMap.get(uid) || "";
+
+    const payout = smartTradePayout(Number(acc.planPrice), Number(acc.earnedProfit || 0), base);
+    const perUserAmt = payout.user;
+    const perParentsPool = payout.parents;
+    const earnedProfit = round2(Number(acc.earnedProfit || 0) + perUserAmt);
+    const expired = earnedProfit >= smartTradeCap(Number(acc.planPrice));
+    await AiAccount.updateOne({ _id: acc._id, status: "active" }, {
+      $set: { earnedProfit, ...(expired ? { status: "expired", is_active: false, expiredAt: new Date() } : {}) },
+    }, { session });
+    if (expired) await refreshSmartEligibility(acc.userId, session);
 
     /* ── self 60% ────────────────────────────────────────── */
     selfIncs.set(uid, round2((selfIncs.get(uid) || 0) + perUserAmt));
@@ -157,13 +187,14 @@ export async function distributeOnAutoCloseSimple(posId: string) {
 
     /* ── user transaction: Ai Trade Profit ───────────────── */
     txPromises.push(
-      txManager.createTransaction({
+      () => txManager.createTransaction({
         userId: uid,
         customerId: childCustId,
         transactionType: "cashIn",
         amount: perUserAmt,
         purpose: "Trade Profit",
         description: msgUser(childCustId, perUserAmt),
+        session,
       }),
     );
 
@@ -178,6 +209,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
 
       for (let i = 0; i < max; i++) {
         const pid = String(parents[i]);
+        if (!await hasEligibleSmartAccount(pid, session)) continue;
         const pct = PARENTS_SPLIT[i] / pctSum;
         const amt = round2(perParentsPool * pct);
 
@@ -209,13 +241,14 @@ export async function distributeOnAutoCloseSimple(posId: string) {
         // parent transaction
         const label = LEVEL_LABELS[i] ?? `L${i + 1}`;
         txPromises.push(
-          txManager.createTransaction({
+          () => txManager.createTransaction({
             userId: pid,
             customerId: "", // optional: fill with parent's customerId if you fetch it
             transactionType: "cashIn",
             amount: amt,
             purpose: "Trade Commission",
             description: msgParent(childCustId, label, amt),
+            session,
           }),
         );
       }
@@ -227,7 +260,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
     const ops = Array.from(selfIncs.entries()).map(([id, amt]) => ({
       updateOne: { filter: { _id: id }, update: { $inc: { m_balance: amt } } },
     }));
-    await User.bulkWrite(ops);
+    await User.bulkWrite(ops, { session });
   }
 
   /* ── apply parent credits (bulkWrite) ──────────────────── */
@@ -235,7 +268,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
     const ops = Array.from(parentIncs.entries()).map(([id, amt]) => ({
       updateOne: { filter: { _id: id }, update: { $inc: { m_balance: amt } } },
     }));
-    await User.bulkWrite(ops);
+    await User.bulkWrite(ops, { session });
   }
 
   /* ✅ NEW: apply wallet increments (user + parents) */
@@ -273,7 +306,7 @@ export async function distributeOnAutoCloseSimple(posId: string) {
     }
 
     if (ops.length) {
-      await UserWallet.bulkWrite(ops, { ordered: false });
+      await UserWallet.bulkWrite(ops, { ordered: false, session });
     }
   }
 
@@ -287,12 +320,12 @@ export async function distributeOnAutoCloseSimple(posId: string) {
         // setOnInsert: { userId: pid }  // চাইলে যোগ করতে পারো
       },
     }));
-    await UserTeamSummary.bulkWrite(ops, { ordered: false });
+    await UserTeamSummary.bulkWrite(ops, { ordered: false, session });
   }
 
   /* ✅ NEW: aggregate totals for SystemStats */
-  const usersTotalProfit = round2(perUserAmt * accounts.length); // ইউজারদের 60% মোট
-  const parentsTotalCommission = round2(perParentsPool * accounts.length); // পেরেন্টদের 30% মোট
+  const usersTotalProfit = round2(Array.from(selfIncs.values()).reduce((sum, value) => sum + value, 0)); // ইউজারদের 60% মোট
+  const parentsTotalCommission = round2(Array.from(parentIncs.values()).reduce((sum, value) => sum + value, 0)); // পেরেন্টদের 30% মোট
 
   /* ✅ NEW: SystemStats -> today/total profit & today commission */
   await SystemStats.updateOne(
@@ -305,20 +338,20 @@ export async function distributeOnAutoCloseSimple(posId: string) {
         totalAiTradeCommission: parentsTotalCommission,
       },
     },
-    { upsert: true },
+    { upsert: true, session },
   ).exec();
 
   /* ── apply company income (10% per account, once) ──────── */
-  const companyTotal = round2(perCompanyAmt * accounts.length);
+  const companyTotal = round2(accounts.reduce((sum, acc) => sum + smartTradePayout(Number(acc.planPrice), Number(acc.earnedProfit || 0), base).company, 0));
   await SystemStats.updateOne(
     {},
     { $inc: { "income.aiTradeCharge": companyTotal } },
-    { upsert: true },
+    { upsert: true, session },
   ).exec();
 
   /* ── create all transactions ───────────────────────────── */
   if (txPromises.length) {
-    await Promise.all(txPromises);
+    for (const createTransaction of txPromises) await createTransaction();
   }
 
   return {

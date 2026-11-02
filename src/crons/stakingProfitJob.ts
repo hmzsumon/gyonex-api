@@ -1,5 +1,5 @@
 import { getStakingSettings } from "@/models/StakingSetting.model";
-import { isStakingProfitDay, stakingDayKey, stakingProfitCap } from "@/utils/stakingPolicy";
+import { isStakingProfitDay, stakingDayKey } from "@/utils/stakingPolicy";
 import SpotWallet from "@/models/SpotWallet.model";
 import StakingProfitLog from "@/models/StakingProfitLog.model";
 import StakingSubscription from "@/models/StakingSubscription.model";
@@ -135,18 +135,15 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
       );
 
       // ✅ Day0 include (+1)
-      const eligiblePayDays = daysPassed + 1;
+      const eligiblePayDays = Math.min(daysPassed + 1, sub.termDays);
       // Walk calendar days: paidDays counts payouts, not weekends or paused days.
       const dueDays = eligiblePayDays;
 
-      const cap = stakingProfitCap(Number(sub.principalQty));
-      let earned = Number(sub.totalProfitQty || 0);
       // 1) profits (catch-up supported)
       if (canPayToday && dueDays > 0) {
         const paidLogs = await StakingProfitLog.find({ subscriptionId: sub._id, type: "profit" }).select("dayKey").lean();
         const paidKeys = new Set(paidLogs.map((log) => log.dayKey));
         for (let i = 0; i < dueDays; i++) {
-          if (earned >= cap) break;
           const payDayIndex = i; // ✅ can be 0
           const payDate = addDays(startedAt, payDayIndex);
           const payKey = sub.profitTimezone === "Asia/Dhaka" ? dayKey(payDate) : legacyDayKey(payDate);
@@ -160,8 +157,8 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
           );
           if (grossProfitQty <= 0) continue;
 
-          const userShare = 0.6;
-          const userProfitQty = round8(Math.min(grossProfitQty * userShare, Math.max(0, cap - earned)));
+          const userShare = sub.userSharePercent ?? getUserShare(Number(sub.termDays));
+          const userProfitQty = round8(grossProfitQty * userShare);
 
           const remainderQty = round8(grossProfitQty - userProfitQty);
           const userSharePercent = round8(userShare * 100);
@@ -184,7 +181,6 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
           }
 
           if (dryRun) {
-            earned = round8(earned + userProfitQty);
             paidLogsCreated += 1;
             totalUserProfitCredited = round8(
               totalUserProfitCredited + userProfitQty
@@ -339,7 +335,6 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
             if (!out || out.skipped) continue;
 
             // ✅ counters after success
-            earned = round8(earned + userProfitQty);
             paidLogsCreated += 1;
             totalUserProfitCredited = round8(
               totalUserProfitCredited + userProfitQty
@@ -358,12 +353,108 @@ export async function runStakingProfitJob(opts: RunProfitOptions = {}) {
         }
       }
 
-      if (earned >= cap) {
-        if (!dryRun) await StakingSubscription.updateOne({ _id: sub._id, status: "active", cancelLocked: { $ne: true } }, { $set: { status: "completed", completedAt: now } });
-        touched.add(`${sub.userId.toString()}:${sub.symbol}`);
+      // 2) principal return if matured
+      if (
+        now.getTime() >= new Date(sub.endAt).getTime() &&
+        !sub.principalReturned
+      ) {
+        if (dryRun) {
+          principalReturnedCount += 1;
+          touched.add(`${sub.userId.toString()}:${sub.symbol}`);
+          continue;
+        }
+
+        const locked = await StakingSubscription.findOneAndUpdate(
+          {
+            _id: sub._id,
+            status: "active",
+            principalReturnLocked: { $ne: true },
+            cancelLocked: { $ne: true },
+          },
+          {
+            $set: {
+              principalReturnLocked: true,
+              principalReturnLockedAt: new Date(),
+            },
+          },
+          { new: true }
+        );
+
+        if (locked) {
+          // return principal (USDT => main balance, others => SpotWallet)
+          const isUSDT = String(locked.symbol || "").toUpperCase() === "USDT";
+          if (isUSDT) {
+            const amt = round8(Number(locked.principalQty));
+            await User.updateOne(
+              { _id: locked.userId },
+              { $inc: { m_balance: +amt } }
+            );
+
+            await createMainBalanceTransaction({
+              userId: locked.userId,
+              customerId: locked.customerId,
+              transactionType: "cashIn",
+              amount: amt,
+              purpose: "Refund",
+              description: `Staking principal returned: ${amt} USDT (maturity)`,
+            }).catch((e) => {
+              console.error(
+                "❌ [staking-profit] transaction (principal_return) failed:",
+                (e as any)?.message || e
+              );
+            });
+          } else {
+            await SpotWallet.findOneAndUpdate(
+              { userId: locked.userId, symbol: locked.symbol },
+              {
+                $setOnInsert: {
+                  userId: locked.userId,
+                  customerId: locked.customerId,
+                  asset: locked.asset,
+                  symbol: locked.symbol,
+
+                  avgPrice: 0,
+                },
+                $inc: { qty: +Number(locked.principalQty) },
+              },
+              { upsert: true }
+            );
+          }
+
+          await StakingSubscription.updateOne(
+            { _id: locked._id, status: "active" },
+            {
+              $set: {
+                principalReturned: true,
+                principalReturnedAt: new Date(),
+                status: "completed",
+                completedAt: new Date(),
+              },
+            }
+          );
+
+          // ✅ history log (idempotent)
+          try {
+            await StakingProfitLog.create({
+              type: "principal_return",
+              subscriptionId: locked._id,
+              userId: locked.userId,
+              asset: locked.asset,
+              symbol: locked.symbol,
+              dayKey: todayKey,
+
+              principalQty: Number(locked.principalQty),
+              principalReturnQty: Number(locked.principalQty),
+              note: "Maturity principal returned",
+            });
+          } catch (e: any) {
+            if (String(e?.code) !== "11000") throw e;
+          }
+
+          principalReturnedCount += 1;
+          touched.add(`${locked.userId.toString()}:${locked.symbol}`);
+        }
       }
-
-
     } catch (err: any) {
       console.error(
         "❌ [staking-profit] error:",

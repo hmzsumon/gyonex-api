@@ -20,12 +20,16 @@ import {
   myAiAccounts,
   placeAiMarketOrder,
 } from "@/controllers/aiAccount.controller";
-import { isAuthenticatedUser } from "@/middlewares/auth";
+import { cancelSmartAccount, getSmartSettings, updateSmartSettings } from "@/controllers/smartTrade.controller";
+import { isAuthenticatedUser, authorizeRoles } from "@/middlewares/auth";
 import { Router } from "express";
 
 const router = Router();
 
 router.get("/ai-plans", getAiPlans);
+router.get("/smart-trade/settings", isAuthenticatedUser, getSmartSettings);
+router.put("/admin/smart-trade/settings", isAuthenticatedUser, authorizeRoles("admin"), updateSmartSettings);
+router.post("/cancel-ai-account/:id", isAuthenticatedUser, cancelSmartAccount);
 router.post("/create-ai-accounts", isAuthenticatedUser, createAiAccount);
 router.get("/my-ai-accounts", isAuthenticatedUser, myAiAccounts);
 router.get("/all-active-ai-accounts", isAuthenticatedUser, getAllAiAccounts);
