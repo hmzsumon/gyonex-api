@@ -1,3 +1,4 @@
+import { luckyPackagePricing } from "@/utils/luckyPricing";
 // src/controllers/lucky.controller.ts
 /* ── Lucky Card controller ──────────────────────────────────────────────
  * লাকি কার্ড = ঘষলেই সরাসরি amount (USDT) — কোনো ম্যাচিং গেম নয়।
@@ -140,23 +141,10 @@ export const getLuckyShop = catchAsync(async (_req: Request, res: Response) => {
       rtp: Math.round(poolPercentSum),
       topPrize:
         Number(type.displayTopPrize) > 0 ? Number(type.displayTopPrize) : poolTop,
-      packages: packages.map((p: any) => {
-        const totalCards = p.cardCount + p.bonusCards;
-        const reg = Number(p.regularPrice || 0);
-        const offer = Number(p.price);
-        return {
-          _id: p._id,
-          name: p.name,
-          cardCount: p.cardCount,
-          bonusCards: p.bonusCards,
-          totalCards,
-          price: offer,
-          regularPrice: reg > offer ? reg : 0,
-          perCard: round2(offer / totalCards),
-          perCardRegular: reg > offer ? round2(reg / totalCards) : 0,
-          discountPercent: reg > offer ? Math.round(((reg - offer) / reg) * 100) : 0,
-        };
-      }),
+      packages: packages.map((p: any) => ({
+        _id: p._id, name: p.name, cardCount: p.cardCount, bonusCards: p.bonusCards,
+        ...luckyPackagePricing(Number(type.price), Number(p.cardCount), Number(p.bonusCards || 0)),
+      })),
     });
   }
 
@@ -166,7 +154,7 @@ export const getLuckyShop = catchAsync(async (_req: Request, res: Response) => {
 // ===== প্যাকেজ কেনা ===== POST /api/v1/lucky/buy  { packageId }
 export const buyLuckyPackage = catchAsync(
   async (req: Request, res: Response, next: NextFunction) => {
-    const { packageId } = req.body as { packageId: string };
+    const { packageId, expectedPrice } = req.body as { packageId: string; expectedPrice?: number };
     if (!mongoose.Types.ObjectId.isValid(packageId || "")) {
       return next(new ApiError(400, "Invalid package"));
     }
@@ -184,8 +172,10 @@ export const buyLuckyPackage = catchAsync(
     const user = await User.findById(userId);
     if (!user) return next(new ApiError(404, "User not found"));
 
-    const totalCards = pkg.cardCount + pkg.bonusCards;
-    const totalPrice = round2(pkg.price);
+    const { totalCards, price: totalPrice } = luckyPackagePricing(Number(pkg.cardType.price), Number(pkg.cardCount), Number(pkg.bonusCards || 0));
+    if (expectedPrice != null && (!Number.isFinite(expectedPrice) || expectedPrice !== totalPrice)) {
+      return next(new ApiError(409, "The card price has changed. Refresh the shop and try again."));
+    }
     const unitPrice = round2(totalPrice / totalCards);
 
     if (Number(user.m_balance || 0) < totalPrice) {
@@ -600,8 +590,7 @@ export const adminListCardTypes = catchAsync(async (_req: Request, res: Response
         name: p.name,
         cardCount: p.cardCount,
         bonusCards: p.bonusCards,
-        regularPrice: Number(p.regularPrice || 0),
-        price: Number(p.price),
+        ...luckyPackagePricing(Number(type.price), Number(p.cardCount), Number(p.bonusCards || 0)),
         isActive: p.isActive,
         sortOrder: p.sortOrder,
       })),
@@ -744,35 +733,25 @@ export const adminDeleteTier = catchAsync(async (req: Request, res: Response) =>
 // ===== package create / update ===== POST /admin/lucky/packages
 export const adminSavePackage = catchAsync(
   async (req: Request, res: Response, next: NextFunction) => {
-    const { _id, cardType, name, cardCount, bonusCards, regularPrice, price, isActive } =
-      req.body;
-
-    if (_id) {
-      const p: any = await LuckyPackage.findById(_id);
-      if (!p) return next(new ApiError(404, "Package not found"));
-      if (name != null) p.name = String(name);
-      if (cardCount != null) p.cardCount = Number(cardCount);
-      if (bonusCards != null) p.bonusCards = Number(bonusCards);
-      if (regularPrice != null) p.regularPrice = Math.max(0, Number(regularPrice) || 0);
-      if (price != null) p.price = Number(price);
-      if (typeof isActive === "boolean") p.isActive = isActive;
-      await p.save();
-      return res.status(200).json({ success: true, package: p });
-    }
-
-    if (!cardType || !name || cardCount == null || price == null) {
-      return next(new ApiError(400, "cardType, name, cardCount, price are required"));
-    }
-    const created = await LuckyPackage.create({
-      cardType,
-      name: String(name),
-      cardCount: Number(cardCount),
-      bonusCards: bonusCards != null ? Number(bonusCards) : 0,
-      regularPrice: regularPrice != null ? Math.max(0, Number(regularPrice) || 0) : 0,
-      price: Number(price),
-      sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
-    });
-    res.status(201).json({ success: true, package: created });
+    const { _id, cardType, name, cardCount, bonusCards, isActive } = req.body;
+    const p: any = _id ? await LuckyPackage.findById(_id) : new LuckyPackage();
+    if (_id && !p) return next(new ApiError(404, "Package not found"));
+    if (!_id && (!cardType || !name || cardCount == null)) return next(new ApiError(400, "cardType, name and cardCount are required"));
+    if (!_id) p.cardType = cardType;
+    const type: any = await LuckyCardType.findById(p.cardType);
+    if (!type) return next(new ApiError(404, "Card type not found"));
+    if (name != null) p.name = String(name);
+    if (cardCount != null) p.cardCount = Number(cardCount);
+    if (bonusCards != null) p.bonusCards = Number(bonusCards);
+    let pricing;
+    try { pricing = luckyPackagePricing(Number(type.price), Number(p.cardCount), Number(p.bonusCards || 0)); }
+    catch { return next(new ApiError(400, "Provide valid card counts and unit price")); }
+    p.price = pricing.price;
+    p.regularPrice = pricing.regularPrice;
+    if (typeof isActive === "boolean") p.isActive = isActive;
+    if (req.body.sortOrder != null) p.sortOrder = Number(req.body.sortOrder);
+    await p.save();
+    res.status(_id ? 200 : 201).json({ success: true, package: p });
   },
 );
 
