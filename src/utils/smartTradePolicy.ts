@@ -19,3 +19,13 @@ export function smartTradePayout(principal: number, earned: number, gross: numbe
   const eligibleGross = user / 0.6;
   return { user, parents: money(eligibleGross * 0.2), company: money(eligibleGross * 0.2) };
 }
+
+// Take profit is a net USDT amount, never a raw price delta.
+export function smartTpPrice(pos: { entryPrice: number; side: string; lots: number;
+  contractSize?: number; commissionOpen?: number; commissionClose?: number; takeProfit?: number }) {
+  const qty = pos.lots * (pos.contractSize ?? 1);
+  const tp = Number(pos.takeProfit);
+  if (!(qty > 0) || !Number.isFinite(qty) || !(tp > 0) || !Number.isFinite(tp)) return NaN;
+  const delta = (tp + (pos.commissionOpen || 0) + (pos.commissionClose || 0)) / qty;
+  return pos.side === "buy" ? pos.entryPrice + delta : pos.entryPrice - delta;
+}

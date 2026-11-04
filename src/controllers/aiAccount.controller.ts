@@ -22,6 +22,8 @@ import { ApiError } from "@/utils/ApiError";
 import { catchAsync } from "@/utils/catchAsync";
 import { generateAccountNumber } from "@/utils/generateAccountNumber";
 import { round2 } from "@/utils/takeProfit";
+import { closeSmartPosition } from "@/services/smartTradeClose.service";
+import { smartTpPrice } from "@/utils/smartTradePolicy";
 import TransactionManager from "@/utils/TransactionManager";
 import updateTeamActiveUsers from "@/utils/updateTeamActiveUsers";
 import updateTeamAiTradeInfo from "@/utils/updateTeamAiTradeInfo";
@@ -296,6 +298,9 @@ export const placeAiMarketOrder: typeHandler = catchAsync(async (req, res) => {
     throw new ApiError(400, "Invalid lot size");
   }
 
+  if (typeof takeProfit !== "number" || !Number.isFinite(takeProfit) || takeProfit <= 0)
+    throw new ApiError(400, "Take profit must be a positive USDT amount");
+
   // ownership + active
   const acc = await Account.findOne({ _id: accountId, userId });
   if (!acc) throw new ApiError(404, "Account not found");
@@ -342,22 +347,11 @@ export const placeAiMarketOrder: typeHandler = catchAsync(async (req, res) => {
   const notional = entryPrice * spec.contractSize * lots;
   const commissionOpen = spec.commissionPerLot * lots;
 
-  /* ────────── manipulateClosePrice by side (tick-rounded) ──────────
-     Rule:
-     - BUY  => entryPrice + takeProfit
-     - SELL => entryPrice - takeProfit
-     Assumes takeProfit is a positive delta (not an absolute price).
-  */
-  let manipulateClosePrice: number | undefined = undefined;
-  if (Number.isFinite(takeProfit) && (takeProfit as number) > 0) {
-    const tpDelta = takeProfit as number;
-    const raw = side === "buy" ? entryPrice + tpDelta : entryPrice - tpDelta;
-    const rounded = roundToTick(raw, tick);
-    manipulateClosePrice =
-      Number.isFinite(rounded) && rounded > 0
-        ? +rounded.toFixed(spec.digits)
-        : undefined;
-  }
+  // TP is net USDT in both order creation and close engines.
+  const manipulateClosePrice = smartTpPrice({ entryPrice, side, lots,
+    contractSize: spec.contractSize, commissionOpen, takeProfit });
+  if (!Number.isFinite(manipulateClosePrice) || manipulateClosePrice <= 0)
+    throw new ApiError(400, "Take profit is unreachable for this order");
 
   const pos = await AiPosition.create({
     accountId: acc._id,
@@ -471,104 +465,12 @@ export const getClosedAiPositionsForUser: typeHandler = catchAsync(
   },
 );
 
-/* ── Close position (DEMO, no transaction) ───────────────── */
+/* ── Close Smart Trade and queue profit delivery ───────────────── */
 export const closeAiPosition: typeHandler = catchAsync(async (req, res) => {
   const userId = req.user?._id;
   if (!userId) throw new ApiError(401, "User not authenticated");
-
-  const { id } = req.params as { id: string };
-
-  const pos = await AiPosition.findById(id);
-  if (!pos) throw new ApiError(404, "Position not found");
-  if (pos.status !== "open") throw new ApiError(400, "Position already closed");
-
-  const acc = await Account.findOne({ _id: pos.accountId, userId });
-  if (!acc) throw new ApiError(403, "Not allowed");
-
-  // normalize numbers
-  const lots = Number(pos.lots);
-  const entry = Number(pos.entryPrice);
-  const csize = Number(pos.contractSize ?? 1);
-  const posMargin = Number(pos.margin ?? 0);
-  if (![lots, entry, csize].every(Number.isFinite)) {
-    throw new ApiError(400, "Invalid position numbers");
-  }
-
-  // opposite-side close price
-  const q = await getTopOfBook(String(pos.symbol));
-  const closePx = pos.side === "buy" ? Number(q.bid) : Number(q.ask);
-  if (!Number.isFinite(closePx) || closePx <= 0) {
-    throw new ApiError(503, "Price unavailable");
-  }
-
-  // P/L
-  const diff = pos.side === "buy" ? closePx - entry : entry - closePx;
-  const gross = diff * csize * lots;
-  const commissionClose = 0; // demo
-  const net = round(gross - commissionClose, 2);
-
-  // try to close position (idempotent)
-  const now = new Date();
-  const closed = await AiPosition.findOneAndUpdate(
-    { _id: pos._id, status: "open" },
-    {
-      $set: {
-        status: "closed",
-        closedAt: now,
-        closePrice: closePx,
-        commissionClose,
-        pnl: net,
-      },
-    },
-    { new: true },
-  );
-  if (!closed) throw new ApiError(400, "Position already closed");
-
-  // update account (no session; last-write-wins)
-
-  const newBalance = round(Number(acc.balance ?? 0) + net, 2);
-  const newEquity = newBalance; // demo: equity == balance (live equity shown on client)
-
-  // await Account.updateOne(
-  //   { _id: acc._id, userId },
-  //   {
-  //     $set: {
-  //       balance: newBalance,
-  //       equity: newEquity,
-  //     },
-  //   }
-  // );
-
-  const spec = getContractSpec(String(pos.symbol));
-
-  // Broadcast close event
-  if ((global as any).io) {
-    (global as any).io.emit("position:closed", {
-      _id: String(pos._id),
-      symbol: pos.symbol,
-      side: pos.side,
-      closePrice: pos.closePrice,
-      pnl: pos.pnl,
-      takeProfit: pos.takeProfit,
-      reason: "takeProfit_usd_ws",
-      closedBy: "admin",
-    });
-  }
-
-  res.json({
-    success: true,
-    position: {
-      _id: closed._id,
-      status: closed.status,
-      closePrice: +closePx.toFixed(spec.digits),
-      pnl: closed.pnl,
-      closedAt: closed.closedAt,
-    },
-    account: {
-      balance: newBalance,
-      equity: newEquity,
-    },
-  });
+  const result = await closeSmartPosition(String(req.params.id), String(userId), req.user!.role);
+  res.json({ success: true, ...result });
 });
 
 /* ── Get all active AI Account and is_active_aiTrade = true for all users ───────────────────────────────── */
@@ -1111,35 +1013,14 @@ export const deleteAllAiPositionsByIsStopLoss: typeHandler = catchAsync(
         .json({ success: false, message: "positionIds array required" });
     }
 
-    // আগে পজিশনগুলো নিয়ে আসি যাতে accountId গুলো পাই
-    const positions = await AiPosition.find({
-      _id: { $in: positionIds },
-      isStopLoss: true,
-    }).select("accountId");
-
-    const accountIds = positions
-      .map((p) => p.accountId)
-      .filter(Boolean)
-      .map((id) => id.toString());
-
-    // ১️⃣ নির্বাচিত পজিশন ডিলিট
-    await AiPosition.deleteMany({
-      _id: { $in: positionIds },
-      isStopLoss: true,
-    });
-
-    // ২️⃣ ঐ পজিশনগুলোর account গুলো আপডেট
-    if (accountIds.length > 0) {
-      await Account.updateMany(
-        { _id: { $in: accountIds } },
-        { $set: { is_stop_loss: false } },
-      );
+    if (req.user?.role !== "admin") throw new ApiError(403, "Admin access required");
+    const ids = [...new Set(positionIds)];
+    const results = [];
+    const failures: { id: string; message: string }[] = [];
+    for (const id of ids) {
+      try { results.push(await closeSmartPosition(id, String(req.user!._id), req.user!.role)); }
+      catch (error: any) { failures.push({ id, message: error.message }); }
     }
-
-    res.json({
-      success: true,
-      deletedCount: positionIds.length,
-      updatedAccounts: accountIds.length,
-    });
+    res.json({ success: failures.length === 0, closedCount: results.length, failures });
   },
 );

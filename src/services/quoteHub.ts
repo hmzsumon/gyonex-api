@@ -12,6 +12,8 @@ type Sub = {
   retry: number;
   hb?: NodeJS.Timeout | null;
   connecting?: boolean;
+  stopped?: boolean;
+  reconnectTimer?: NodeJS.Timeout;
 };
 
 const subs = new Map<string, Sub>(); // key = symbol (UPPER)
@@ -22,7 +24,7 @@ function lower(sym: string) {
 }
 
 function connect(sub: Sub) {
-  if (sub.connecting) return;
+  if (sub.connecting || sub.stopped) return;
   sub.connecting = true;
   const path = `${lower(sub.symbol)}@bookTicker`;
   const url = `${BINANCE_WS}/ws/${path}`;
@@ -61,7 +63,10 @@ function connect(sub: Sub) {
     } catch {}
   });
 
+  let cleaned = false;
   const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     if (sub.hb) clearInterval(sub.hb);
     sub.hb = null;
     sub.ws = null;
@@ -69,7 +74,7 @@ function connect(sub: Sub) {
 
     // backoff reconnect
     const delay = Math.min(5000, 300 * Math.pow(2, sub.retry++));
-    setTimeout(() => connect(sub), delay);
+    if (!sub.stopped) sub.reconnectTimer = setTimeout(() => connect(sub), delay);
   };
 
   ws.on("close", cleanup);
@@ -89,9 +94,12 @@ export function subscribeQuote(symbol: string, onQuote: (q: Quote) => void) {
     const s = subs.get(sym);
     if (!s) return;
     s.listeners.delete(onQuote);
-    if (s.listeners.size === 0 && s.ws) {
+    if (s.listeners.size === 0) {
+      s.stopped = true;
+      if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
+      if (s.hb) clearInterval(s.hb);
       try {
-        s.ws.close();
+        s.ws?.close();
       } catch {}
       subs.delete(sym);
     }

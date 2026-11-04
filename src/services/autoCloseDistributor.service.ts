@@ -58,13 +58,16 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
   if (guard.modifiedCount === 0) return { ok: true, skipped: true };
 
   /* ── base amount from takeProfit ───────────────────────── */
-  const baseRaw = Number(pos.takeProfit ?? 0);
+  const baseRaw = pos.closeReason === "manual" ? Math.max(0, Number(pos.pnl ?? 0)) : Number(pos.takeProfit ?? 0);
   if (!(baseRaw > 0))
     return { ok: true, skipped: true, reason: "no_takeProfit" };
   const base = round2(baseRaw);
 
   /* ── load all active user accounts for this plan ───────── */
+  const sourceAccount = await AiAccount.findById(pos.accountId).session(session).lean();
+  if (!sourceAccount) throw new Error("Source account not found");
   const candidates = await AiAccount.find({
+    ...(sourceAccount.role !== "admin" ? { _id: pos.accountId } : {}),
     plan: pos.plan,
     status: "active",
     role: "user",
@@ -102,6 +105,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
     closePrice: pos.closePrice,
     manipulateClosePrice: pos.manipulateClosePrice,
     pnl: pos.pnl,
+    closeReason: pos.closeReason,
     takeProfit: pos.takeProfit,
     stopLoss: pos.stopLoss,
     plan: pos.plan,
@@ -111,7 +115,12 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
   }));
 
   /* ── bulk insert cloned positions ──────────────────────── */
-  await AiPosition.insertMany(clones, { session });
+  if (sourceAccount.role === "admin") {
+    await AiPosition.insertMany(clones, { session });
+  } else if (clones[0]) {
+    // Individual closes already have their own history row.
+    await AiPosition.updateOne({ _id: pos._id }, { $set: { userProfitCredited: clones[0].userProfitCredited } }, { session });
+  }
 
   /* ── compute per-account amounts ───────────────────────── */
   const perUserAmt = round2(base * PCT_USER);
@@ -357,7 +366,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
   return {
     ok: true,
     skipped: false,
-    replicated: clones.length,
+    replicated: sourceAccount.role === "admin" ? clones.length : 0,
     perUserAmt,
     perParentsPool,
     companyTotal,

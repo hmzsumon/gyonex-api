@@ -4,8 +4,9 @@
 // - Subscribes to per-symbol quote stream (bid/ask)
 // - On every quote, checks whether TP is hit and closes atomically
 
+import { smartTpPrice } from "@/utils/smartTradePolicy";
 import AiPosition, { IAiPosition } from "@/models/AiPosition.model";
-import { normalizeSymbol } from "@/services/quote.service";
+import { getTopOfBook, normalizeSymbol } from "@/services/quote.service";
 import { subscribeQuote } from "@/services/quoteHub";
 import { getContractSpec } from "@/services/specs.service";
 import { netPnlAt, round2 } from "@/utils/takeProfit";
@@ -24,22 +25,14 @@ function tickFromDigits(d: number): number {
 
 /** Returns the TP trigger price for a position (absolute USD TP). */
 function calcTpTriggerPrice(pos: IAiPosition): number {
-  const qty = (pos.lots || 0) * (pos.contractSize || 1);
-  if (!(qty > 0)) return NaN;
-
-  const fees = (pos.commissionOpen || 0) + (pos.commissionClose || 0);
-  const tpUsd = Number(pos.takeProfit) || 0;
-  if (!(tpUsd > 0)) return NaN;
-
-  const delta = (tpUsd + fees) / qty;
-  return pos.side === "buy" ? pos.entryPrice + delta : pos.entryPrice - delta;
+  return smartTpPrice(pos);
 }
 
 /* ──────────────────────────────────────────────────────────
  * Core: try to close a single position with the given quote
  * ────────────────────────────────────────────────────────── */
 
-async function tryCloseIfTpHitWithQuote(
+export async function tryCloseIfTpHitWithQuote(
   pos: IAiPosition,
   bid: number,
   ask: number,
@@ -51,7 +44,7 @@ async function tryCloseIfTpHitWithQuote(
   }
 
   const tick = tickFromDigits(specDigits);
-  const eps = tick; // tolerance = one tick
+  const eps = tick * 1e-6; // floating point tolerance only
 
   const trigger = calcTpTriggerPrice(pos);
   if (!Number.isFinite(trigger)) return { closed: false };
@@ -89,6 +82,7 @@ async function tryCloseIfTpHitWithQuote(
         closeQuoteTs: ts ?? Date.now(),
         closeReason: "takeProfit_usd_ws",
         distributionPending: true,
+        userProfitCredited: 0,
       },
     }
   ).exec();
@@ -206,6 +200,16 @@ async function refreshCache(): Promise<void> {
     bySym.get(s)!.push(entry);
   }
 
+  // Periodic recovery if a WebSocket disconnects or misses a brief update.
+  // One quote per symbol; the open-status guard arbitrates races with WS closes.
+  await Promise.all(Array.from(bySym, async ([sym, positions]) => {
+    try {
+      const q = await getTopOfBook(sym);
+      await Promise.all(positions.map(pos =>
+        tryCloseIfTpHitWithQuote(pos, Number(q.bid), Number(q.ask), pos._digits)));
+    } catch (error) { console.error("[TP-WS] recovery check failed", sym, error); }
+  }));
+
   // 3) Manage subscriptions (unsubscribe removed, subscribe new)
   const nextSymbols = new Set(bySym.keys());
   const currentSymbols = new Set(cache.keys());
@@ -274,15 +278,24 @@ async function refreshCache(): Promise<void> {
  * ────────────────────────────────────────────────────────── */
 
 /** Starts the WS-driven TP engine (idempotent). */
+let refreshing = false;
+async function refreshSafely() {
+  if (refreshing) return;
+  refreshing = true;
+  try { await refreshCache(); }
+  catch (error) { console.error("[TP-WS] cache refresh failed", error); }
+  finally { refreshing = false; }
+}
+
 export function startTpWsEngine(): void {
   if (refreshTimer) return; // already running
 
   // Initial load immediately
-  refreshCache().catch(() => {});
+  void refreshSafely();
 
   // Periodic rebuild of symbol-set & cache
   refreshTimer = setInterval(() => {
-    refreshCache().catch(() => {});
+    void refreshSafely();
   }, REFRESH_MS);
 }
 

@@ -119,6 +119,27 @@ async function main() {
   await assert.rejects(invoke(cancelSmartAccount, { ...req, params: { id: String(old) } }), /first calendar month/);
   await assert.rejects(invoke(cancelSmartAccount, { user: { _id: activeParent }, params: { id: String(old) } }), /not found/);
   await assert.rejects(invoke(updateSmartSettings, { user: { _id: activeParent }, body: { cancellationFeePercent: 101 } }), /between 0 and 100/);
+  // Manual closes pay realized net profit, not the configured TP target.
+  const manualUser = await user();
+  const manualAccount = await account(manualUser, { plan: 'manual-test' });
+  const manualSource = await source(adminAccount, { plan: 'manual-test', closeReason: 'manual', pnl: 4, takeProfit: 50 });
+  await distributeOnAutoCloseSimple(String(manualSource));
+  assert.equal((await User.findById(manualUser)).m_balance, 2.4);
+  assert.equal((await Account.findById(manualAccount)).earnedProfit, 2.4);
+  assert.equal((await Position.findOne({ sourcePositionId: manualSource })).userProfitCredited, 2.4);
+  await distributeOnAutoCloseSimple(String(manualSource));
+  assert.equal((await User.findById(manualUser)).m_balance, 2.4);
+
+  // An individual user's close must never distribute to everyone in the plan.
+  const individualSource = await source(manualAccount, { plan: 'manual-test', closeReason: 'manual', pnl: 5, userProfitCredited: 0 });
+  const otherUser = await user();
+  await account(otherUser, { plan: 'manual-test' });
+  await distributeOnAutoCloseSimple(String(individualSource));
+  assert.equal((await User.findById(manualUser)).m_balance, 5.4);
+  assert.equal((await User.findById(otherUser)).m_balance, 0);
+  assert.equal((await Position.findById(individualSource)).userProfitCredited, 3);
+  assert.equal(await Position.countDocuments({ sourcePositionId: individualSource }), 0);
+
   console.log('PASS: capped profit, expiry, generation gating, renewal, legacy backfill, duplicate/concurrent payout, admin fee and atomic cancellation.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {

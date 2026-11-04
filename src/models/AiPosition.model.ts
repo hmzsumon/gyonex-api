@@ -29,6 +29,7 @@ export interface IAiPosition extends Document {
   is_loss?: boolean; // flag for ai algo
   isStopLoss?: boolean;
   isGlobal: boolean;
+  closeReason?: string;
   distributedAt?: Date;
   distributionPending?: boolean;
   sourcePositionId?: Types.ObjectId;
@@ -81,6 +82,7 @@ const aiPositionSchema = new Schema<IAiPosition>(
     is_loss: { type: Boolean, default: false },
     isStopLoss: { type: Boolean, default: false },
     isGlobal: { type: Boolean, default: true },
+    closeReason: String,
     distributedAt: Date,
     distributionPending: Boolean,
     sourcePositionId: { type: Schema.Types.ObjectId, ref: "AiPosition" },

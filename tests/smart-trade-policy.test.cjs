@@ -23,3 +23,16 @@ test('cancellation closes at one calendar month, including shorter months', () =
   assert.equal(smartAccountView(account, 10, new Date('2026-11-02T10:00:00+06:00')).canCancel, false);
   assert.equal(smartAccountView({ ...account, status: 'expired' }, 10, new Date('2026-10-03')).canCancel, false);
 });
+
+test('net USDT TP uses volume, contract size, side and both commissions', () => {
+  const { smartTpPrice } = require('../src/utils/smartTradePolicy');
+  const { netPnlAt } = require('../src/utils/takeProfit');
+  for (const side of ['buy', 'sell']) {
+    const pos = { side, entryPrice: 100, lots: 0.5, contractSize: 2,
+      takeProfit: 10, commissionOpen: 1, commissionClose: 2 };
+    const closePrice = smartTpPrice(pos);
+    assert.equal(closePrice, side === 'buy' ? 113 : 87);
+    assert.equal(netPnlAt({ ...pos, closePrice }), 10);
+  }
+  assert.ok(Number.isNaN(smartTpPrice({ entryPrice: 100, side: 'buy', lots: 0, takeProfit: 10 })));
+});

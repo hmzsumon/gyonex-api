@@ -39,3 +39,32 @@ assert.doesNotMatch(early, /role="progressbar"/);
 // The client must also hide a stale server button immediately at the deadline.
 assert.doesNotMatch(render({ ...account, canCancel: true }), />Cancel Account</);
 console.log('PASS: actual Smart Trade component shows cancel before deadline, progress after deadline, and expiry/renewal at 100%.');
+
+// Render the actual receipt with a capped credit, not an estimated 60%.
+const previousLoad = Module._load;
+Module._load = function(id, parent, isMain) {
+  if (id === '@/components/ui/drawer') {
+    const Pass = ({children}) => React.createElement('div', null, children);
+    return Object.fromEntries(['Drawer','DrawerClose','DrawerContent','DrawerFooter','DrawerHeader','DrawerTitle'].map(key=>[key,Pass]));
+  }
+  if (id === '@/utils/num') return { fmt: (n, dp) => n.toFixed(dp) };
+  return previousLoad.call(this,id,parent,isMain);
+};
+const drawerFilename = path.join(client, 'components/ai/positions/ClosedDetailsDrawer.tsx');
+const drawerModule = new Module(drawerFilename, module);
+drawerModule.filename = drawerFilename;
+drawerModule.paths = Module._nodeModulePaths(path.dirname(drawerFilename));
+drawerModule._compile(ts.transpileModule(require('node:fs').readFileSync(drawerFilename,'utf8'), {
+  compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,esModuleInterop:true}
+}).outputText,drawerFilename);
+const receipt = renderToStaticMarkup(React.createElement(drawerModule.exports.default, {
+  open:true,onOpenChange(){},position:{ s:'BTC', symbol:'BTCUSDT', side:'buy', lots:1,
+    entryPrice:100,closePrice:110,maniClosePrice:999,profit:10,pnlUsd:10,
+    userProfitCredited:0.3,is_loss:false,status:'closed' }
+}));
+assert.match(receipt,/0\.30 USDT/);
+assert.match(receipt,/0\.20 USDT/);
+assert.match(receipt,/110\.00/);
+assert.doesNotMatch(receipt,/999\.00|6\.00 USDT/);
+Module._load = previousLoad;
+console.log('PASS: actual receipt shows capped credit and executed close price.');
