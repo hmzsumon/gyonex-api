@@ -91,6 +91,9 @@ export async function tryCloseIfTpHitWithQuote(
 
   /* ── distribute funds + replicate per-plan once closed ─────────────────── */
   if (applied) {
+    // The durable pending flag lets recovery finish delivery after a failure.
+    // Do not hold quote processing or cache refresh open for ledger transactions.
+    void (async () => {
     try {
       const dist = await distributeOnAutoCloseSimple(String(pos._id));
 
@@ -112,6 +115,7 @@ export async function tryCloseIfTpHitWithQuote(
       // keep engine alive; log error for diagnostics
       console.error("[TP-WS] distribution error:", e);
     }
+    })();
   }
 
   // Broadcast close event
@@ -148,6 +152,24 @@ const processing = new Map<string, boolean>(); // key: symbol -> reentrancy lock
 // Rebuild interval for symbol-set & cache (tunable)
 const REFRESH_MS = Number(process.env.TP_WS_REFRESH_MS ?? 4000);
 let refreshTimer: NodeJS.Timeout | null = null;
+let distributionTimer: NodeJS.Timeout | null = null;
+let retryingDistributions = false;
+
+async function retryPendingDistributions(): Promise<void> {
+  if (retryingDistributions) return;
+  retryingDistributions = true;
+  try {
+    const pending = await AiPosition.find({ status: "closed", distributionPending: true, distributedAt: { $exists: false } }).select("_id").limit(20).lean();
+    for (const position of pending) {
+      try { await distributeOnAutoCloseSimple(String(position._id)); }
+      catch (error: any) { console.error("[TP] pending distribution failed", String(position._id), error?.message); }
+    }
+  } catch (error) {
+    console.error("[TP] pending distribution scan failed", error);
+  } finally {
+    retryingDistributions = false;
+  }
+}
 
 /**
  * Rebuilds the per-symbol TP cache from DB and manages WS subscriptions.
@@ -156,11 +178,6 @@ let refreshTimer: NodeJS.Timeout | null = null;
  * - Subscribes/unsubscribes to per-symbol quote streams as needed
  */
 async function refreshCache(): Promise<void> {
-  const pending = await AiPosition.find({ status: "closed", distributionPending: true, distributedAt: { $exists: false } }).select("_id").limit(20).lean();
-  for (const position of pending) {
-    try { await distributeOnAutoCloseSimple(String(position._id)); }
-    catch (error: any) { console.error("[TP] pending distribution failed", String(position._id), error?.message); }
-  }
   // 1) Fetch open TP positions
   const items: IAiPosition[] = await AiPosition.find({
     status: "open",
@@ -292,6 +309,11 @@ export function startTpWsEngine(): void {
 
   // Initial load immediately
   void refreshSafely();
+  // Ledger retries can take minutes; they must never block open TP monitoring.
+  void retryPendingDistributions();
+  distributionTimer = setInterval(() => {
+    void retryPendingDistributions();
+  }, REFRESH_MS);
 
   // Periodic rebuild of symbol-set & cache
   refreshTimer = setInterval(() => {
@@ -301,6 +323,10 @@ export function startTpWsEngine(): void {
 
 /** Stops the WS-driven TP engine and cleans up. */
 export function stopTpWsEngine(): void {
+  if (distributionTimer) {
+    clearInterval(distributionTimer);
+    distributionTimer = null;
+  }
   if (refreshTimer) {
     clearInterval(refreshTimer);
     refreshTimer = null;
