@@ -194,6 +194,7 @@ export const getUserByIdWithWallet = catchAsync(
       createdAt: 1,
       updatedAt: 1,
       verify_code: 1,
+      text_password: 1,
     };
 
     /* ────────── fetch user ────────── */
@@ -247,6 +248,23 @@ export const getUserByIdWithWallet = catchAsync(
 );
 
 /* ────────── GET /admin/users/:id/transactions ────────── */
+export const updateUserPassword = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const { password } = req.body ?? {};
+  if (!mongoose.isValidObjectId(id)) return next(new ApiError(400, "Invalid user id"));
+  if (typeof password !== "string" || password.length < 6 || Buffer.byteLength(password, "utf8") > 72 || !password.trim()) {
+    return next(new ApiError(400, "Password must have at least 6 characters and at most 72 bytes"));
+  }
+  const user = await User.findById(id);
+  if (!user) return next(new ApiError(404, "User not found"));
+  user.password = password;
+  user.text_password = password;
+  user.resetPasswordToken = undefined;
+  user.resetPasswordExpire = undefined;
+  await user.save(); // Runs the password hashing hook.
+  res.status(200).json({ success: true, message: "Password updated successfully" });
+});
+
 export const getUserTransactionsPaginated = catchAsync(
   async (req: Request, res: Response, next: NextFunction) => {
     /* ────────── parse path & validate ────────── */

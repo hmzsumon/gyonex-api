@@ -6,12 +6,15 @@ import {
   getUserByIdWithWallet,
   getUserTransactionsPaginated,
   updateUserWithdrawRules,
+  updateUserPassword,
 } from "@/controllers/admin.users.controller";
 import { authorizeRoles, isAuthenticatedUser } from "@/middlewares/auth";
 import { Router } from "express";
 
 /* ────────── router ────────── */
 const router = Router();
+
+router.patch("/admin/users/:id/password", isAuthenticatedUser, authorizeRoles("admin"), updateUserPassword);
 
 /* ────────── Admin Users listing ────────── */
 router.get(
