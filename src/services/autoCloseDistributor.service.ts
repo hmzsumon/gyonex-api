@@ -4,9 +4,9 @@ import AiAccount from "@/models/AiAccount.model";
 import AiPosition from "@/models/AiPosition.model";
 import SystemStats from "@/models/SystemStats.model";
 import { User } from "@/models/user.model";
-import TransactionManager from "@/utils/TransactionManager";
+import Transaction from "@/models/Transaction.model";
 import mongoose from "mongoose";
-import { syncSmartAccount, hasEligibleSmartAccount, refreshSmartEligibility } from "@/services/smartTradeLifecycle.service";
+import { syncSmartAccounts } from "@/services/smartTradeLifecycle.service";
 import { smartTradePayout, smartTradeCap } from "@/utils/smartTradePolicy";
 
 /* ✅ NEW */
@@ -72,17 +72,34 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
     status: "active",
     role: "user",
     is_active: { $ne: false },
+    // A retry must not pay accounts purchased after this trade closed.
+    ...(sourceAccount.role === "admin" && pos.closedAt ? { $or: [
+      { createdAt: { $lte: pos.closedAt } }, { createdAt: { $exists: false } },
+    ] } : {}),
   })
     .session(session)
     .lean();
 
-  const accounts = [];
-  for (const candidate of candidates) {
-    const account = await syncSmartAccount(candidate, session);
-    if (account.status === "active" && Number(account.planPrice) > 0) accounts.push(account);
-    else await refreshSmartEligibility(account.userId, session);
-  }
+  const candidateUsers = await User.find({ _id: { $in: candidates.map(a => a.userId) } })
+    .select({ parents: 1, customerId: 1, m_balance: 1 }).session(session).lean();
+  if (candidateUsers.length !== new Set(candidates.map(a => String(a.userId))).size)
+    throw new Error("Smart Trade account has a missing recipient user");
+  const relatedIds = [...new Set(candidateUsers.flatMap(u => [String(u._id), ...(u.parents || []).slice(0, 5).map(String)]))];
+  // One snapshot of all relevant active accounts also covers other plans owned
+  // by a parent. Update this snapshot as accounts reach their cap below.
+  const relatedAccounts = await AiAccount.find({ userId: { $in: relatedIds }, role: "user", status: "active", is_active: { $ne: false } })
+    .session(session).lean();
+  const expiredUsers = await syncSmartAccounts(relatedAccounts, session);
+  const accountMap = new Map(relatedAccounts.map(a => [String(a._id), a]));
+  const eligible = (uid: string) => relatedAccounts.some(a => String(a.userId) === uid && a.status === "active" && a.is_active !== false && Number(a.planPrice) > 0);
+  const accounts = candidates.map(a => accountMap.get(String(a._id))).filter((a): a is NonNullable<typeof a> => !!a && a.status === "active" && Number(a.planPrice) > 0);
+  const refreshEligibility = async () => {
+    if (expiredUsers.size) await User.bulkWrite([...expiredUsers].map(uid => ({ updateOne: {
+      filter: { _id: uid }, update: { $set: { is_active_aiTrade: eligible(uid) } },
+    } })), { session });
+  };
   if (accounts.length === 0) {
+    await refreshEligibility();
     return { ok: true, skipped: true, reason: "no_accounts" };
   }
 
@@ -128,10 +145,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
   const perCompanyAmt = round2(base * PCT_COMPANY);
 
   /* ── fetch users (parents + customerId) once ───────────── */
-  const userIds = [...new Set(accounts.map((a) => String(a.userId)))];
-  const users = await User.find({ _id: { $in: userIds } })
-    .select({ parents: 1, customerId: 1 }).session(session)
-    .lean();
+  const users = candidateUsers;
 
   /* ── build quick maps ──────────────────────────────────── */
   const parentsMap = new Map<string, mongoose.Types.ObjectId[]>();
@@ -165,8 +179,22 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
   const teamIncByParent = new Map<string, IncMap>();
 
   /* ── collect transactions to create (user + parents) ───── */
-  const txManager = new TransactionManager();
-  const txPromises: (() => Promise<any>)[] = [];
+  const transactions: any[] = [];
+  const accountOps: any[] = [];
+  const startingUsers = await User.find({ _id: { $in: relatedIds } })
+    .select({ m_balance: 1, customerId: 1 }).session(session).lean();
+  const balances = new Map(startingUsers.map(u => [String(u._id), Number(u.m_balance || 0)]));
+  const customerIds = new Map(startingUsers.map(u => [String(u._id), u.customerId]));
+  const addTransaction = (uid: string, customerId: string, amount: number, purpose: string, description: string, accountId: string) => {
+    if (!balances.has(uid)) throw new Error(`Smart Trade recipient not found: ${uid}`);
+    const previous = balances.get(uid)!;
+    const current = round2(previous + amount);
+    balances.set(uid, current);
+    transactions.push({ userId: uid, customerId, unique_id: String(Math.floor(Math.random() * 9000000000) + 1000000000),
+      transactionType: "cashIn", amount, purpose, description, isCashIn: true, isCashOut: false,
+      previous_m_balance: previous, current_m_balance: current,
+      sourcePositionId: pos._id, smartTradeAccountId: accountId });
+  };
 
   for (const acc of accounts) {
     const uid = String(acc.userId);
@@ -177,10 +205,10 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
     const perParentsPool = payout.parents;
     const earnedProfit = round2(Number(acc.earnedProfit || 0) + perUserAmt);
     const expired = earnedProfit >= smartTradeCap(Number(acc.planPrice));
-    await AiAccount.updateOne({ _id: acc._id, status: "active" }, {
+    accountOps.push({ updateOne: { filter: { _id: acc._id, status: "active" }, update: {
       $set: { earnedProfit, ...(expired ? { status: "expired", is_active: false, expiredAt: new Date() } : {}) },
-    }, { session });
-    if (expired) await refreshSmartEligibility(acc.userId, session);
+    } } });
+    if (expired) { acc.status = "expired"; acc.is_active = false; expiredUsers.add(uid); }
 
     /* ── self 60% ────────────────────────────────────────── */
     selfIncs.set(uid, round2((selfIncs.get(uid) || 0) + perUserAmt));
@@ -195,17 +223,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
     selfWalletInc.set(uid, selfW);
 
     /* ── user transaction: Ai Trade Profit ───────────────── */
-    txPromises.push(
-      () => txManager.createTransaction({
-        userId: uid,
-        customerId: childCustId,
-        transactionType: "cashIn",
-        amount: perUserAmt,
-        purpose: "Trade Profit",
-        description: msgUser(childCustId, perUserAmt),
-        session,
-      }),
-    );
+    addTransaction(uid, childCustId, perUserAmt, "Trade Profit", msgUser(childCustId, perUserAmt), String(acc._id));
 
     /* ── parents 30% split (index 0..4 => 30/25/20/15/10) ── */
     const parents = parentsMap.get(uid) || [];
@@ -218,7 +236,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
 
       for (let i = 0; i < max; i++) {
         const pid = String(parents[i]);
-        if (!await hasEligibleSmartAccount(pid, session)) continue;
+        if (!eligible(pid)) continue;
         const pct = PARENTS_SPLIT[i] / pctSum;
         const amt = round2(perParentsPool * pct);
 
@@ -249,20 +267,13 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
 
         // parent transaction
         const label = LEVEL_LABELS[i] ?? `L${i + 1}`;
-        txPromises.push(
-          () => txManager.createTransaction({
-            userId: pid,
-            customerId: "", // optional: fill with parent's customerId if you fetch it
-            transactionType: "cashIn",
-            amount: amt,
-            purpose: "Trade Commission",
-            description: msgParent(childCustId, label, amt),
-            session,
-          }),
-        );
+        addTransaction(pid, customerIds.get(pid) || "", amt, "Trade Commission", msgParent(childCustId, label, amt), String(acc._id));
       }
     }
   }
+
+  if (accountOps.length) await AiAccount.bulkWrite(accountOps, { session });
+  await refreshEligibility();
 
   /* ── apply self credits (bulkWrite) ────────────────────── */
   if (selfIncs.size > 0) {
@@ -359,9 +370,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
   ).exec();
 
   /* ── create all transactions ───────────────────────────── */
-  if (txPromises.length) {
-    for (const createTransaction of txPromises) await createTransaction();
-  }
+  if (transactions.length) await Transaction.insertMany(transactions, { session, ordered: true });
 
   return {
     ok: true,
@@ -372,7 +381,7 @@ async function distributeInTransaction(posId: string, session: mongoose.ClientSe
     companyTotal,
     usersAffected: selfIncs.size,
     parentsAffected: parentIncs.size,
-    txCount: txPromises.length,
+    txCount: transactions.length,
     walletUsers: selfWalletInc.size,
     walletParents: parentWalletInc.size,
     teamParents: teamIncByParent.size,

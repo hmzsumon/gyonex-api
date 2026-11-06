@@ -74,11 +74,10 @@ async function main() {
 
   // A ledger error must roll back the counter, wallet, clones, and source guard.
   const failedSource = await source(adminAccount);
-  const Manager = require('../src/utils/TransactionManager').default;
-  const originalCreate = Manager.prototype.createTransaction;
-  Manager.prototype.createTransaction = async () => { throw new Error('simulated ledger failure'); };
+  const originalCreate = Transaction.insertMany;
+  Transaction.insertMany = async () => { throw new Error('simulated ledger failure'); };
   try { await assert.rejects(distributeOnAutoCloseSimple(String(failedSource)), /simulated ledger failure/); }
-  finally { Manager.prototype.createTransaction = originalCreate; }
+  finally { Transaction.insertMany = originalCreate; }
   assert.equal((await Account.findById(fresh)).earnedProfit, 6);
   assert.equal((await User.findById(child)).m_balance, 6.3);
   assert.equal((await Position.findById(failedSource)).distributedAt, undefined);
@@ -139,6 +138,59 @@ async function main() {
   assert.equal((await User.findById(otherUser)).m_balance, 0);
   assert.equal((await Position.findById(individualSource)).userProfitCredited, 3);
   assert.equal(await Position.countDocuments({ sourcePositionId: individualSource }), 0);
+
+  // Production-sized plan: 83 legacy accounts sharing five eligible parents.
+  // Query count must stay bounded rather than grow for every referral and ledger row.
+  const scaleParents = [];
+  for (let i = 0; i < 5; i++) {
+    const parent = await user();
+    await account(parent, { plan: 'scale-parents', planPrice: 10000 });
+    scaleParents.push(parent);
+  }
+  const scaleUsers = [], scaleAccounts = [];
+  for (let i = 0; i < 83; i++) {
+    const uid = await user(scaleParents);
+    await User.updateOne({ _id: uid }, { $set: { m_balance: 100 } });
+    const aid = await account(uid, { plan: 'scale', earnedProfit: undefined });
+    await Position.collection.insertOne({ accountId: aid, status: 'closed', takeProfit: 1 });
+    scaleUsers.push(uid); scaleAccounts.push(aid);
+  }
+  const scaleSource = await source(adminAccount, { plan: 'scale', takeProfit: 2.34, distributionPending: true });
+  let commands = 0;
+  mongoose.set('debug', () => { commands++; });
+  let scaleResult;
+  const started = Date.now();
+  try { scaleResult = await distributeOnAutoCloseSimple(String(scaleSource)); }
+  finally { mongoose.set('debug', false); }
+  assert.ok(commands < 35, `Expected bulk distribution, got ${commands} database commands`);
+  assert.equal(scaleResult.usersAffected, 83);
+  assert.equal(scaleResult.txCount, 498);
+  assert.equal((await Account.findById(scaleAccounts[0])).earnedProfit, 2);
+  assert.equal((await User.findById(scaleUsers[0])).m_balance, 101.4);
+  const scaleTx = await Transaction.find({ userId: scaleUsers[0], purpose: 'Trade Profit' });
+  assert.equal(scaleTx.length, 1);
+  assert.equal(scaleTx[0].previous_m_balance, 100);
+  assert.equal(scaleTx[0].current_m_balance, 101.4);
+  const parentTx = await Transaction.find({ userId: scaleParents[0], purpose: 'Trade Commission' }).sort({ _id: 1 });
+  assert.equal(parentTx.length, 83);
+  for (let i = 1; i < parentTx.length; i++) assert.equal(parentTx[i].previous_m_balance, parentTx[i - 1].current_m_balance);
+  assert.equal((await distributeOnAutoCloseSimple(String(scaleSource))).skipped, true);
+  assert.equal(await Position.countDocuments({ sourcePositionId: scaleSource }), 83);
+  assert.equal(await Transaction.countDocuments({ userId: { $in: scaleUsers }, purpose: 'Trade Profit' }), 83);
+  console.log(`PASS: 83 legacy accounts, 5 parents, 498 ledger rows in ${commands} database commands (${Date.now() - started}ms).`);
+
+  const cutoffUser = await user();
+  const cutoffAccount = await account(cutoffUser, { plan: 'cutoff', createdAt: new Date('2026-11-03T00:00:00Z') });
+  const cutoffSource = await source(adminAccount, { plan: 'cutoff', closedAt: new Date('2026-11-02T00:00:00Z') });
+  assert.equal((await distributeOnAutoCloseSimple(String(cutoffSource))).reason, 'no_accounts');
+  assert.equal((await Account.findById(cutoffAccount)).earnedProfit, 0);
+  assert.equal(await Transaction.countDocuments({ sourcePositionId: cutoffSource }), 0);
+
+  // An orphaned account must abort rather than silently mark the plan paid.
+  await account(oid(), { plan: 'orphan' });
+  const orphanSource = await source(adminAccount, { plan: 'orphan', distributionPending: true });
+  await assert.rejects(distributeOnAutoCloseSimple(String(orphanSource)), /missing recipient/);
+  assert.equal((await Position.findById(orphanSource)).distributedAt, undefined);
 
   console.log('PASS: capped profit, expiry, generation gating, renewal, legacy backfill, duplicate/concurrent payout, admin fee and atomic cancellation.');
 }

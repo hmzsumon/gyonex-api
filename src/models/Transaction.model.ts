@@ -64,6 +64,8 @@ export type TransactionPurpose =
   | "Welcome Bonus";
 
 export interface ITransaction extends Document {
+  sourcePositionId?: Types.ObjectId;
+  smartTradeAccountId?: Types.ObjectId;
   userId: Types.ObjectId;
   customerId?: string;
   unique_id: string;
@@ -82,6 +84,8 @@ export interface ITransaction extends Document {
 
 const transactionSchema = new Schema<ITransaction>(
   {
+    sourcePositionId: { type: Schema.Types.ObjectId, ref: "AiPosition" },
+    smartTradeAccountId: { type: Schema.Types.ObjectId, ref: "AiAccount" },
     userId: {
       type: Schema.Types.ObjectId,
       ref: "User",
